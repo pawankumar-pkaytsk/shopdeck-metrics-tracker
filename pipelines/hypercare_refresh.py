@@ -17,6 +17,8 @@ CRED_CACHE = os.path.expanduser("~/metabase-arr-refresh/.mbcreds")
 DESKTOP_CFG = os.path.expanduser("~/Library/Application Support/Claude/claude_desktop_config.json")
 import re
 HYPERCARE_GCS = ['nikita s', 'sadiya', 'nishan', 'aaruni', 'dev vashisth']
+ACTIVE_GCS = ['nikita s', 'dev', 'aaruni', 'nishan', 'sadiya']  # Nikita S, Dev, Aaruni, Nishan Bandekar, Sadiya
+ALLOC_OUT = os.path.join(REPO, "hypercare_alloc.json")
 norm = lambda s: re.sub(r'\s+', ' ', str(s or '')).strip().lower()
 
 
@@ -52,21 +54,31 @@ def main():
     print(f"[hypercare] mapping(7753)={len(mapping)} · spend(10065)={len(spend)} rows")
 
     last_spend = {}
+    company = {}
     for r in spend:
         sid = str(r.get('seller id') or r.get('seller_id') or '').strip()
         ls = str(r.get('last spend date') or '')[:10]
         if sid:
             last_spend[sid] = ls
+            company[sid] = str(r.get('company') or '')
     today = datetime.date.today()
 
-    def stale(sid):
+    def days_since(sid):
         ls = last_spend.get(sid, '')
         if not ls:
-            return True  # never spent -> >45d
+            return None
         try:
-            return (today - datetime.date.fromisoformat(ls)).days > 45
+            return (today - datetime.date.fromisoformat(ls)).days
         except ValueError:
-            return True
+            return None
+
+    def stale(sid):
+        ds = days_since(sid)
+        return ds is None or ds > 45
+
+    def active(sid):  # spent within last 45 days
+        ds = days_since(sid)
+        return ds is not None and ds < 45
 
     hyper = []
     matched_gc = set()
@@ -83,8 +95,27 @@ def main():
     json.dump(out, open(OUT, 'w'), separators=(',', ':'))
     print(f"[out] {OUT} ({os.path.getsize(OUT)} bytes) · {len(hyper)} hypercare sellers · GCs matched: {sorted(matched_gc)}")
 
+    # active hypercare set (GC in ACTIVE_GCS, last spend < 45 days) with GC/GM/name — for Spend/Live + Central Reports
+    alloc = []
+    seen = set()
+    for r in mapping:
+        sid = str(r.get('seller_id') or '').strip()
+        gc = norm(r.get('growth_consultant_name'))
+        if not sid or not gc or sid in seen:
+            continue
+        if any(gc == tok or gc.startswith(tok + ' ') for tok in ACTIVE_GCS) and active(sid):
+            seen.add(sid)
+            alloc.append({'id': sid, 'n': company.get(sid, ''),
+                          'gc': str(r.get('growth_consultant_name') or '').strip() or 'Unassigned',
+                          'gm': str(r.get('growth_manager_name') or '').strip() or 'Unassigned'})
+    alloc.sort(key=lambda x: (x['gc'], x['n']))
+    aout = {'generatedAt': out['generatedAt'], 'sellers': alloc}
+    json.dump(aout, open(ALLOC_OUT, 'w'), separators=(',', ':'))
+    from collections import Counter as _C
+    print(f"[out] {ALLOC_OUT} ({os.path.getsize(ALLOC_OUT)} bytes) · {len(alloc)} active hypercare sellers · by GC: {dict(_C(x['gc'] for x in alloc))}")
+
     if '--push' in sys.argv:
-        subprocess.run(['git', '-C', REPO, 'add', 'hypercare_sellers.json'], check=True)
+        subprocess.run(['git', '-C', REPO, 'add', 'hypercare_sellers.json', 'hypercare_alloc.json'], check=True)
         r = subprocess.run(['git', '-C', REPO, 'commit', '-m', 'Refresh Hypercare seller mapping'], capture_output=True, text=True)
         print(r.stdout.strip() or r.stderr.strip())
         if r.returncode == 0:
