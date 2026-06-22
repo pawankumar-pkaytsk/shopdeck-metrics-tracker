@@ -55,7 +55,7 @@ def main():
     url, email, pw = creds()
     tok = req(url + "/api/session", 'POST', {"username": email, "password": pw}, {'Content-Type': 'application/json'})['id']
     H = {'Content-Type': 'application/json', 'X-Metabase-Session': tok}
-    WINDOW_DAYS = 30
+    WINDOW_DAYS = 45
     cutoff = (datetime.date.today() - datetime.timedelta(days=WINDOW_DAYS)).isoformat()
     import re as _re
     norm = lambda s: _re.sub(r'\s+', ' ', str(s or '')).strip().lower()
