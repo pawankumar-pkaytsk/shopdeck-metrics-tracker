@@ -1,0 +1,63 @@
+name: Refresh data
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    env:
+      METABASE_URL: ${{ secrets.METABASE_URL }}
+      METABASE_USER_EMAIL: ${{ secrets.METABASE_USER_EMAIL }}
+      METABASE_PASSWORD: ${{ secrets.METABASE_PASSWORD }}
+      REPO_DIR: ${{ github.workspace }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: ARR (output)
+        run: python pipelines/output_refresh.py
+      - name: Troubleshoot (ts + hitsMap)
+        run: python pipelines/ts_refresh.py
+      - name: Task & Call compliance
+        run: python pipelines/task_refresh.py
+      - name: Spend/Live (scaling + google T/S)
+        run: python pipelines/scaling_refresh.py
+      - name: Bucket summary
+        run: python pipelines/bucket_refresh.py
+      - name: Golive overview
+        run: python pipelines/golive_refresh.py
+      - name: HIT 1
+        run: python pipelines/hit1_refresh.py
+      - name: HIT 2
+        run: python pipelines/hit2_refresh.py
+      - name: Hypercare sellers
+        run: python pipelines/hypercare_refresh.py
+      - name: NPS
+        run: python pipelines/nps_refresh.py
+      - name: Bird Eye View (depends on the above)
+        run: python pipelines/bev_refresh.py
+
+      - name: Commit & push refreshed data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A -- '*.json'
+          if git diff --cached --quiet; then
+            echo "No data changes."
+          else
+            git commit -m "Refresh data (workflow_dispatch)"
+            git push origin HEAD:main
+          fi
