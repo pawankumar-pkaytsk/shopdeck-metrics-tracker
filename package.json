@@ -1,0 +1,12 @@
+{
+  "name": "shopdeck-metrics-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.0",
+    "@babel/preset-react": "^7.24.0"
+  }
+}
