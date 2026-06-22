@@ -105,9 +105,10 @@ def main():
             continue
         if any(gc == tok or gc.startswith(tok + ' ') for tok in ACTIVE_GCS) and active(sid):
             seen.add(sid)
+            _clean = lambda v: (str(v or '').strip() if str(v or '').strip() not in ('', '-') else 'Unassigned')
             alloc.append({'id': sid, 'n': company.get(sid, ''),
-                          'gc': str(r.get('growth_consultant_name') or '').strip() or 'Unassigned',
-                          'gm': str(r.get('growth_manager_name') or '').strip() or 'Unassigned'})
+                          'gc': _clean(r.get('growth_consultant_name')),
+                          'gm': _clean(r.get('growth_manager_name'))})
     alloc.sort(key=lambda x: (x['gc'], x['n']))
     aout = {'generatedAt': out['generatedAt'], 'sellers': alloc}
     json.dump(aout, open(ALLOC_OUT, 'w'), separators=(',', ':'))
