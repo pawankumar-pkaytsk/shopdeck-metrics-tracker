@@ -63,3 +63,10 @@ jobs:
             git commit -m "Refresh data (workflow_dispatch)"
             git push origin HEAD:main
           fi
+
+      - name: Deploy frontend to Vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: team_Nv7Bqm9rCMXGjFA018pplRCW
+          VERCEL_PROJECT_ID: prj_v9e41pt0iUaXCTlwLwfkgvRPHqfT
+        run: npx --yes vercel@latest --prod --yes --token "$VERCEL_TOKEN"
