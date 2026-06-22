@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import crypto from 'node:crypto';
 import babel from '@babel/core';
 
 const SRC = 'index.html';
@@ -16,6 +17,39 @@ fs.mkdirSync(ASSET_DIR, { recursive: true });
 const html = fs.readFileSync(SRC, 'utf8');
 const manifest = JSON.parse(html.match(/<script type="__bundler\/manifest">([\s\S]*?)<\/script>/)[1]);
 let template = JSON.parse(html.match(/<script type="__bundler\/template">("[\s\S]*?")<\/script>/)[1]);
+
+// --- Vercel-only transforms (source stays Google-based for GitHub Pages) ---
+// 1) Replace the Google SheetsAPI with a JSON-backed shim (reads build-time sheet JSON).
+{
+  const s = template.indexOf('window.SheetsAPI = (function');
+  if (s >= 0) {
+    let i = template.indexOf('{', s), depth = 0, close = -1;
+    for (let j = i; j < template.length; j++) {
+      if (template[j] === '{') depth++;
+      else if (template[j] === '}') { if (--depth === 0) { close = j; break; } }
+    }
+    const end = close + 5; // include })();
+    const shim = `window.SheetsAPI = (function () {
+  var jc = {};
+  function load(f) { if (jc[f]) return jc[f]; jc[f] = fetch(f, { cache: 'no-store' }).then(function (r) { if (!r.ok) throw new Error(f + ' not generated'); return r.json(); }).then(function (j) { return j.values || []; }); return jc[f]; }
+  var FILE = { '1QCdVIkKa_4yMb1NZHSkIt50x4qoKaFlw2WXpQZnL6KM': 'daily_plan.json', '1ZLOcj648aYvVaEGHX_QHB1Qx3OMUT3K_eeW-SBUbCso': 'handover.json', '1eIbQU-odVp6lwBnawIIdSbpVHIrywy98Ib4RsZhEPgk': 'escalation.json' };
+  function s2iso(s) { return new Date(Math.round((s - 25569) * 86400000)).toISOString().slice(0, 10); }
+  function toISO(v) { if (v === null || v === undefined || v === '') return null; if (typeof v === 'number') return s2iso(v); var d = new Date(v); return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10); }
+  function pr(r) { return { date: toISO(r[0]), gc: r[1] != null ? String(r[1]).trim() : '', gm: r[2] != null ? String(r[2]).trim() : '', assigned: Number(r[3]) || 0, live: Number(r[5]) || 0, spending: Number(r[7]) || 0 }; }
+  return {
+    signIn: function () { return Promise.resolve('local'); },
+    isSignedIn: function () { return true; },
+    getUser: function () { return null; },
+    getRows: function (start, end) { return load('spendinputs.json').then(function (vals) { return vals.map(pr).filter(function (row) { if (!row.date) return false; if (start && row.date < start) return false; if (end && row.date > end) return false; return true; }); }); },
+    refresh: function (start, end) { jc = {}; return this.getRows(start, end); },
+    getValues: function (id) { var f = FILE[id]; return f ? load(f) : Promise.resolve([]); }
+  };
+})();`;
+    template = template.slice(0, s) + shim + template.slice(end);
+  }
+}
+// 2) Bypass the Google gate (Clerk/ATLAS gates the embedded app).
+template = template.replace('const [authed, setAuthed] = useState(false)', 'const [authed, setAuthed] = useState(true)');
 
 // decode + gunzip every manifest resource
 const res = {};
@@ -74,3 +108,36 @@ fs.writeFileSync(path.join(OUT, 'index.html'), template);
 for (const f of fs.readdirSync('.')) if (f.endsWith('.json') && f !== 'package.json' && f !== 'package-lock.json') fs.copyFileSync(f, path.join(OUT, f));
 
 console.log(`[build] public/ ready · ${nPlain} JS resources, ${nBabelChunks} compiled JSX chunks, main.js · Babel dropped: ${droppedBabel}`);
+
+// Fetch the Google Sheets at build time via the service account (GOOGLE_SA_KEY env) so they
+// ship as static JSON — the frontend needs no browser Google login.
+if (process.env.GOOGLE_SA_KEY) {
+  try {
+    const sa = JSON.parse(process.env.GOOGLE_SA_KEY);
+    const b64 = (b) => Buffer.from(b).toString('base64url');
+    const now = Math.floor(Date.now() / 1000);
+    const head = b64(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+    const claim = b64(JSON.stringify({ iss: sa.client_email, scope: 'https://www.googleapis.com/auth/spreadsheets.readonly', aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 }));
+    const sig = crypto.createSign('RSA-SHA256').update(head + '.' + claim).sign(sa.private_key).toString('base64url');
+    const tr = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=' + head + '.' + claim + '.' + sig });
+    const tok = (await tr.json()).access_token;
+    const SH = [
+      ['spendinputs.json', '1wwfbMVkMKq80Znq1mkpO-NCLI-fc7d2hPIepCp04bQ0', 'A2:H', 'SERIAL_NUMBER'],
+      ['daily_plan.json', '1QCdVIkKa_4yMb1NZHSkIt50x4qoKaFlw2WXpQZnL6KM', "'Daily Plan'!A:AK", 'FORMATTED_STRING'],
+      ['handover.json', '1ZLOcj648aYvVaEGHX_QHB1Qx3OMUT3K_eeW-SBUbCso', "'handover'!A:J", 'FORMATTED_STRING'],
+      ['escalation.json', '1eIbQU-odVp6lwBnawIIdSbpVHIrywy98Ib4RsZhEPgk', "'Raw_Suggested'!A:P", 'FORMATTED_STRING'],
+    ];
+    for (const [out, sid, range, dr] of SH) {
+      const u = `https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/${encodeURIComponent(range)}?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=${dr}`;
+      const r = await fetch(u, { headers: { Authorization: 'Bearer ' + tok } });
+      const vals = (await r.json()).values || [];
+      const trimmed = vals.length ? [vals[0], ...vals.slice(1).filter((row) => row.some((c) => String(c).trim()))] : [];
+      fs.writeFileSync(path.join(OUT, out), JSON.stringify({ generatedAt: new Date().toISOString(), range, values: trimmed }));
+      console.log(`[build] sheet ${out}: ${trimmed.length} rows`);
+    }
+  } catch (e) {
+    console.error('[build] sheet fetch failed:', e.message);
+  }
+} else {
+  console.log('[build] GOOGLE_SA_KEY not set — sheet-backed views will be empty');
+}
