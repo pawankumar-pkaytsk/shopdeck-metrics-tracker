@@ -30,8 +30,16 @@ def creds():
 def req(url, method='GET', body=None, H=None):
     data = json.dumps(body).encode() if body is not None else None
     r = urllib.request.Request(url, data=data, method=method, headers=H or {})
-    with urllib.request.urlopen(r, timeout=300) as resp:
-        return json.loads(resp.read().decode())
+    import time as _t
+    last = None
+    for _attempt in range(4):
+        try:
+            with urllib.request.urlopen(r, timeout=600) as resp:
+                return json.loads(resp.read().decode())
+        except Exception as _e:
+            last = _e
+            _t.sleep(3 * (_attempt + 1))
+    raise last
 
 
 def main():
