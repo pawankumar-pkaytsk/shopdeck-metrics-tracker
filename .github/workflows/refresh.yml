@@ -2,6 +2,8 @@ name: Refresh data
 
 on:
   workflow_dispatch: {}
+  schedule:
+    - cron: '30 2 * * *'   # daily 02:30 UTC (08:00 IST)
 
 permissions:
   contents: write
