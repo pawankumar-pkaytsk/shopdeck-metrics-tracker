@@ -18,8 +18,9 @@ import json, os, sys, subprocess, urllib.request, datetime
 
 ARR_CARD = 10892
 HIT_CARD = 10453
-COHORT_CARD = 10881  # all 1k-5k sellers ARR cohort (hit_year_month x M0..M5)
-COHORT_ARR_CARD = 7336  # sellerwise-monthwise ARR (feeds 10881) — used to build per-cell drilldown
+COHORT_CARD = 11020  # hit1 seller-monthwise ARR cohort (hit_year_month x M0..M6, incl TARGET row)
+COHORT_ARR_CARD = 7336  # sellerwise-monthwise ARR — seller-level, for per-cell drilldown + GM/GL split
+COHORT_MAP_CARD = 7753  # seller -> GC (growth_consultant_name) / GM (growth_manager_name)
 # sellers excluded from the cohort (mirrors card 10881 SQL)
 COHORT_EXCLUDE = {
     '6842d90c72a04e21d2b1a568', '68a6d75f199d3a1a4dc5999f', '6899cdfb9276fa61e591e495', '685e8c7272a04e21d2c4d06f',
@@ -249,23 +250,22 @@ def main():
                             'mon': MON3[int(hm) - 1] + ' ' + str(int(hy)), 'team': str(r.get('team') or '')})
     hit2_detail.sort(key=lambda x: x['mon'])
 
-    # ---- ARR cohort (card 10881): hit_year_month x M0..M5, with TARGET row ----
+    # ---- ARR cohort (card 11020): hit_year_month x M0..M6, with TARGET row ----
     cohort_raw = req(f"{url}/api/card/{COHORT_CARD}/query/json", 'POST', {}, H)
-    mcols = ['M0', 'M1', 'M2', 'M3', 'M4', 'M5']
+    mcols = ['M0', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6']
     target = {}
     cohort_rows = []
     for r in cohort_raw:
         ym = str(r.get('hit_year_month') or '')
-        vals = {c: (round(fnum(r.get(c))) if r.get(c) is not None else None) for c in mcols}
+        vals = {c: (round(fnum(r.get(c.lower()))) if r.get(c.lower()) is not None else None) for c in mcols}
         if ym.upper() == 'TARGET':
             target = vals
         else:
             cohort_rows.append({'ym': ym, 'n': r.get('seller_count'), 'v': vals})
     cohort_rows.sort(key=lambda x: x['ym'])
 
-    # per-cell drilldown: which sellers (and their monthly ARR) compose each cohort cell.
-    # cohort seller = hit_master_data (card 10453) where (team='HITS' or hit2=1), not excluded, hit_year_month>=202602
-    cohort_sellers = {}  # seller_id -> hit_year_month
+    # cohort membership (seller -> earliest hit_year_month, matching 11020's MIN) from hit_master_data
+    cohort_sellers = {}
     for r in hitrows:
         sid = str(r.get('seller_id') or '').strip()
         if not sid or sid in COHORT_EXCLUDE:
@@ -275,15 +275,26 @@ def main():
         if not is_hits or hm is None or hy is None:
             continue
         ym = '%d%02d' % (int(hy), int(hm))
-        if ym >= '202602':
-            cohort_sellers.setdefault(sid, set()).add(ym)  # a seller can belong to >1 cohort
+        if ym >= '202510' and (sid not in cohort_sellers or ym < cohort_sellers[sid]):
+            cohort_sellers[sid] = ym
+
+    # seller -> GC/GM (card 7753)
+    clean = lambda v: (str(v or '').strip() if str(v or '').strip() not in ('', '-') else 'Unassigned')
+    smap = {}
+    for r in req(f"{url}/api/card/{COHORT_MAP_CARD}/query/json", 'POST', {}, H):
+        sid = str(r.get('seller_id') or '').strip()
+        if sid:
+            smap[sid] = {'gc': clean(r.get('growth_consultant_name')), 'gm': clean(r.get('growth_manager_name'))}
+
+    # seller-level ARR (card 7336) -> cohort cells + GM/GL cells (avg arr by age) with per-cell drilldown
     arr_rows = req(f"{url}/api/card/{COHORT_ARR_CARD}/query/json", 'POST', {}, H)
-    seen_arr = set()  # dedup (seller, year_month)
-    cohort_detail = {}  # ym -> {Mk -> [ {s,n,arr,arrYm} ]}
+    seen_arr = set()
+    cohort_detail, gm_cells, gl_cells = {}, {}, {}
+    gm_sellers, gl_sellers = {}, {}
     for r in arr_rows:
         sid = str(r.get('seller_id') or '').strip()
-        cohorts = cohort_sellers.get(sid)
-        if not cohorts:
+        cym = cohort_sellers.get(sid)
+        if not cym:
             continue
         try:
             aym = str(int(r.get('year_month')))
@@ -295,16 +306,37 @@ def main():
         arr_v = r.get('arr')
         if arr_v is None:
             continue
-        for cohort_ym in cohorts:
-            age = (int(aym[:4]) - int(cohort_ym[:4])) * 12 + (int(aym[4:]) - int(cohort_ym[4:]))
-            if age < 0 or age > 5:
-                continue
-            cohort_detail.setdefault(cohort_ym, {}).setdefault('M%d' % age, []).append(
-                {'s': sid, 'n': str(r.get('company_name') or ''), 'arr': round(fnum(arr_v)), 'arrYm': aym})
-    for ym in cohort_detail:
-        for mk in cohort_detail[ym]:
-            cohort_detail[ym][mk].sort(key=lambda x: -x['arr'])
-    cohort = {'mcols': mcols, 'target': target, 'rows': cohort_rows, 'detail': cohort_detail}
+        age = (int(aym[:4]) - int(cym[:4])) * 12 + (int(aym[4:]) - int(cym[4:]))
+        if age < 0 or age > 6:
+            continue
+        mk = 'M%d' % age
+        rec = {'s': sid, 'n': str(r.get('company_name') or ''), 'arr': round(fnum(arr_v))}
+        mm = smap.get(sid, {})
+        gc, gm = mm.get('gc', 'Unassigned'), mm.get('gm', 'Unassigned')
+        cohort_detail.setdefault(cym, {}).setdefault(mk, []).append(rec)
+        gm_cells.setdefault(gm, {}).setdefault(mk, []).append(rec)
+        gl_cells.setdefault(gc, {}).setdefault(mk, []).append(rec)
+        gm_sellers.setdefault(gm, set()).add(sid)
+        gl_sellers.setdefault(gc, set()).add(sid)
+
+    def mgr_rows(cells, sellers):
+        out = []
+        for name in sorted(cells):
+            v = {}
+            for mk in mcols:
+                lst = cells[name].get(mk)
+                v[mk] = round(sum(x['arr'] for x in lst) / len(lst)) if lst else None
+            out.append({'ym': name, 'n': len(sellers.get(name, ())), 'v': v})
+        return out
+    gm_rows, gl_rows = mgr_rows(gm_cells, gm_sellers), mgr_rows(gl_cells, gl_sellers)
+
+    for d in (cohort_detail, gm_cells, gl_cells):
+        for k in d:
+            for mk in d[k]:
+                d[k][mk].sort(key=lambda x: -x['arr'])
+    cohort = {'mcols': mcols, 'target': target, 'rows': cohort_rows, 'detail': cohort_detail,
+              'byGM': {'rows': gm_rows, 'detail': gm_cells},
+              'byGL': {'rows': gl_rows, 'detail': gl_cells}}
 
     # ---- CHURN: sellers who moved HIT -> REVENUE (card 1880), spent >= ₹11,800 with tax after the
     # switch, AND whose last spend (card 10065) is > 21 days ago. Both must hold. ----
