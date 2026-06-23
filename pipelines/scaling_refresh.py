@@ -75,7 +75,12 @@ def main():
         rec['ga'] = str(acct).strip() if acct not in (None, '') else ''
         rec['gy'] = fnum(r.get('yesterday_spend'))  # google yesterday spend
         rec['gt'] = fnum(r.get('total_marketing_spend_with_tax'))  # google total marketing spend (w/tax)
-        g7[sid] = fnum(r.get('last_7_days_spend'))  # google last-7-day spend
+
+    # Google last-7-day spend (for Google T/S eligibility) from card 7669 col 'google_spend_last7day'
+    for r in req(f"{url}/api/card/7669/query/json", 'POST', {}, H):
+        sid = str(r.get('seller_id') or '').strip()
+        if HEX24.match(sid):
+            g7[sid] = fnum(r.get('google_spend_last7day'))
 
     out = {
         'generatedAt': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
