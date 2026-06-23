@@ -358,7 +358,13 @@ def main():
     def target_for(age):
         return target.get('M%d' % min(max(age, 0), 5)) or 0
 
-    gc_arrT, gc_arrA, gc_det, gc_hit2A, gc2gm = {}, {}, {}, {}, {}
+    gc_arrT, gc_arrA, gc_det, gc_hit2A, gc2gm, gc_hit2_det = {}, {}, {}, {}, {}, {}
+    # global GC -> GM map (so Collated GLs get a GM even with no running sellers this month)
+    gc2gm_all = {}
+    for _sid, _mm in smap.items():
+        _g = _mm.get('gc')
+        if _g and _g != 'Unassigned' and _g not in gc2gm_all:
+            gc2gm_all[_g] = _mm.get('gm') or 'Unassigned'
     if report_ym:
         ry, rm = int(report_ym[:4]), int(report_ym[4:])
         for sid, cym in cohort_sellers.items():
@@ -382,31 +388,39 @@ def main():
                     continue
             except (ValueError, TypeError):
                 continue
-            gc = smap.get(str(r.get('seller_id') or '').strip(), {}).get('gc', 'Unassigned')
+            sid_h = str(r.get('seller_id') or '').strip()
+            gc = smap.get(sid_h, {}).get('gc', 'Unassigned')
             gc_hit2A[gc] = gc_hit2A.get(gc, 0) + 1
+            gc_hit2_det.setdefault(gc, []).append({'s': sid_h, 'n': str(r.get('seller_name') or '') or name_by_s.get(sid_h, '')})
 
-    gls = sorted(set(gc_arrT) | set(gc_hit2A) | set(hit2_target))
+    # Canonical 1k-5k GLs = the GLs listed in the Collated target sheet (excludes revival/other
+    # GCs that 7753 may map a seller to, and excludes Unassigned).
+    gls = sorted(g for g in hit2_target if g != 'Unassigned')
     byGL_rows = [{'name': g, 'hit2T': hit2_target.get(g), 'hit2A': gc_hit2A.get(g, 0),
                   'arrT': round(gc_arrT.get(g, 0)), 'arrA': round(gc_arrA.get(g, 0)), 'n': len(gc_det.get(g, []))} for g in gls]
     byGL_detail = {g: sorted(gc_det.get(g, []), key=lambda x: -x['arr']) for g in gls}
+    byGL_hit2 = {g: gc_hit2_det.get(g, []) for g in gls}
 
-    gm_T, gm_A, gm_h2T, gm_h2A, gm_det = {}, {}, {}, {}, {}
+    gm_T, gm_A, gm_h2T, gm_h2A, gm_det, gm_hit2 = {}, {}, {}, {}, {}, {}
     for g in gls:
-        gm = gc2gm.get(g, 'Unassigned')
+        gm = gc2gm_all.get(g) or 'Unassigned'
+        if gm == 'Unassigned':
+            continue  # drop the Unassigned bucket
         gm_T[gm] = gm_T.get(gm, 0) + gc_arrT.get(g, 0)
         gm_A[gm] = gm_A.get(gm, 0) + gc_arrA.get(g, 0)
         gm_h2A[gm] = gm_h2A.get(gm, 0) + gc_hit2A.get(g, 0)
-        if hit2_target.get(g) is not None:
-            gm_h2T[gm] = gm_h2T.get(gm, 0) + hit2_target[g]
+        gm_h2T[gm] = gm_h2T.get(gm, 0) + (hit2_target.get(g) or 0)
         gm_det.setdefault(gm, []).extend(gc_det.get(g, []))
-    gms = sorted(set(gm_T) | set(gm_h2A))
+        gm_hit2.setdefault(gm, []).extend(gc_hit2_det.get(g, []))
+    gms = sorted(gm_T)
     byGM_rows = [{'name': gm, 'hit2T': gm_h2T.get(gm), 'hit2A': gm_h2A.get(gm, 0),
                   'arrT': round(gm_T.get(gm, 0)), 'arrA': round(gm_A.get(gm, 0)), 'n': len(gm_det.get(gm, []))} for gm in gms]
     byGM_detail = {gm: sorted(gm_det.get(gm, []), key=lambda x: -x['arr']) for gm in gms}
+    byGM_hit2 = {gm: gm_hit2.get(gm, []) for gm in gms}
 
     cohort = {'mcols': mcols, 'target': target, 'rows': cohort_rows, 'detail': cohort_detail, 'reportMonth': report_ym,
-              'byGM': {'rows': byGM_rows, 'detail': byGM_detail},
-              'byGL': {'rows': byGL_rows, 'detail': byGL_detail}}
+              'byGM': {'rows': byGM_rows, 'detail': byGM_detail, 'hit2': byGM_hit2},
+              'byGL': {'rows': byGL_rows, 'detail': byGL_detail, 'hit2': byGL_hit2}}
 
     # ---- CHURN: sellers who moved HIT -> REVENUE (card 1880), spent >= ₹11,800 with tax after the
     # switch, AND whose last spend (card 10065) is > 21 days ago. Both must hold. ----
