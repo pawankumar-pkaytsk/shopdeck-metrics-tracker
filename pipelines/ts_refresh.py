@@ -75,6 +75,37 @@ def main():
             's7': round(num(r.get('last_7_days__meta_spend_w_tax')), 2),
         }
 
+    # --- Complete last-7d META spend (with tax) for ALL sellers ---
+    # Card 10189's base is built only from sellers that already have a T/S action, so high-spend
+    # sellers that were NEVER troubleshot are absent entirely → last7=0 → never "Eligible".
+    # Merge the full spend (same definition as 10189) so every spending seller is covered.
+    try:
+        import urllib.parse
+        spend_sql = ("SELECT seller_id, ROUND(SUM(spend)*1.18,2) AS s7 "
+                     "FROM `blitzscale-prod-project.fb_marketings.fb_marketing_insights` "
+                     "WHERE breakdown_key is NULL "
+                     "AND TIMESTAMP_TRUNC(spend_date, DAY) >= TIMESTAMP(DATE_SUB(CURRENT_DATE('Asia/Kolkata'), INTERVAL 7 DAY)) "
+                     "AND TIMESTAMP_TRUNC(spend_date, DAY) < TIMESTAMP(CURRENT_DATE('Asia/Kolkata')) "
+                     "GROUP BY seller_id")
+        body = urllib.parse.urlencode({"query": json.dumps({"database": 6, "type": "native", "native": {"query": spend_sql}})}).encode()
+        spreq = urllib.request.Request(url + "/api/dataset/json", data=body, method='POST',
+                                       headers={'X-Metabase-Session': tok, 'Content-Type': 'application/x-www-form-urlencoded'})
+        spend_rows = json.loads(urllib.request.urlopen(spreq, timeout=300).read())
+        added = 0
+        for r in spend_rows:
+            sid = str(r.get('seller_id') or '').strip()
+            if not sid:
+                continue
+            s7 = round(num(r.get('s7')), 2)
+            if sid in sellers:
+                sellers[sid]['s7'] = s7  # same source/definition — keeps TS fields, refreshes spend
+            else:
+                sellers[sid] = {'n': '', 't': None, 'd': '', 'ty': '', 'a': '', 's7': s7}
+                added += 1
+        print(f"[spend] merged 7d meta spend for {len(spend_rows)} sellers · {added} added (never-troubleshot spenders)")
+    except Exception as _e:
+        print('[spend] full-spend merge failed (keeping 10189 only):', _e)
+
     # HITS seller -> GL(=GC)/GM/name mapping from card 10892 (same filtered universe as ARR).
     # Used by the 1K-5K and Good Seller teams in Troubleshoot Compliance.
     hits = req(f"{url}/api/card/10892/query/json", 'POST', {}, H)
