@@ -90,6 +90,19 @@ def main():
         }
     print(f"[hits] card 10892: {len(hits_map)} unique sellers mapped (GL/GM)")
 
+    # best PnL visibility (card 11011): seller -> best_source, best_w1_pnl_value, w1_spend
+    pnl = {}
+    for r in req(f"{url}/api/card/11011/query/json", 'POST', {}, H):
+        sid = str(r.get('seller_id') or '').strip()
+        if not sid:
+            continue
+        pnl[sid] = {
+            'src': str(r.get('best_source') or ''),
+            'pnl': r.get('best_w1_pnl_value'),
+            'w1s': round(num(r.get('w1_spend')), 2) if r.get('w1_spend') is not None else None,
+        }
+    print(f"[pnl] card 11011: {len(pnl)} sellers")
+
     out = {
         'generatedAt': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
         'spendThreshold': 3540,
@@ -97,6 +110,7 @@ def main():
         'goodSellerGLs': ['Aitesam Khan', 'Davidson Udayakumar'],
         'sellers': sellers,
         'hitsMap': hits_map,
+        'pnl': pnl,
     }
     json.dump(out, open(OUT, 'w'), separators=(',', ':'))
     print(f"[out] {OUT} ({os.path.getsize(OUT)} bytes) · {len(sellers)} sellers")
