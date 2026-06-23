@@ -332,54 +332,60 @@ def main():
         for mk in cohort_detail[k]:
             cohort_detail[k][mk].sort(key=lambda x: -x['arr'])
 
-    # ---- GL/GM Target vs Achievement (1k-5k, report month) ----
-    # HIT2 target per GC + report month from the 'Collated' sheet
-    hit2_target, report_ym = {}, ''
-    try:
-        rows_c = read_sheet_sa('1cV0DptEcl-HfamWP_6k6oAmLqYliUvo21hDKwWkqq2s', "'Collated'!A2:D")
-        best = (0, 0)
-        for row in rows_c:
-            try:
-                best = max(best, (int(row[3]), int(row[2])))
-            except (ValueError, TypeError, IndexError):
-                continue
-        report_ym = ('%d%02d' % best) if best != (0, 0) else (max(months_seen) if months_seen else '')
-        for row in rows_c:
-            try:
-                if int(row[3]) == int(report_ym[:4]) and int(row[2]) == int(report_ym[4:]):
-                    hit2_target[clean(row[0])] = int(float(row[1]))
-            except (ValueError, TypeError, IndexError):
-                continue
-    except Exception as _e:
-        report_ym = max(months_seen) if months_seen else ''
-        print('[cohort] Collated sheet read failed:', _e)
-    print(f'[cohort] report month {report_ym} · {len(hit2_target)} GC HIT2 targets')
-
+    # ---- GL/GM Target vs Achievement (1k-5k), month-wise ----
     def target_for(age):
         return target.get('M%d' % min(max(age, 0), 5)) or 0
 
-    gc_arrT, gc_arrA, gc_det, gc_hit2A, gc2gm, gc_hit2_det = {}, {}, {}, {}, {}, {}
-    # global GC -> GM map (so Collated GLs get a GM even with no running sellers this month)
+    # HIT2 target per (year_month -> GC) from the 'Collated' sheet
+    hit2_tgt_m = {}
+    try:
+        for row in read_sheet_sa('1cV0DptEcl-HfamWP_6k6oAmLqYliUvo21hDKwWkqq2s', "'Collated'!A2:D"):
+            try:
+                ym = '%d%02d' % (int(row[3]), int(row[2]))
+                hit2_tgt_m.setdefault(ym, {})[clean(row[0])] = int(float(row[1]))
+            except (ValueError, TypeError, IndexError):
+                continue
+    except Exception as _e:
+        print('[cohort] Collated sheet read failed:', _e)
+    # HIT2 owner (seller -> GL/GM) from the 'HITS 2 Handover' sheet (C=seller, E=GL, F=GM)
+    hit2_owner = {}
+    try:
+        for row in read_sheet_sa('198xsGns4LC-80BqAoOdv_Aup29udacaam8WB7jOZalA', "'HITS 2 Handover'!A2:F"):
+            if len(row) >= 5 and str(row[2]).strip():
+                hit2_owner[str(row[2]).strip()] = {'gl': clean(row[4]), 'gm': clean(row[5]) if len(row) >= 6 else 'Unassigned'}
+    except Exception as _e:
+        print('[cohort] HITS 2 Handover sheet read failed:', _e)
+
+    # canonical 1k-5k GLs = union of GLs across all Collated months
+    gls = sorted({g for mm in hit2_tgt_m.values() for g in mm if g != 'Unassigned'})
     gc2gm_all = {}
     for _sid, _mm in smap.items():
         _g = _mm.get('gc')
         if _g and _g != 'Unassigned' and _g not in gc2gm_all:
             gc2gm_all[_g] = _mm.get('gm') or 'Unassigned'
-    if report_ym:
-        ry, rm = int(report_ym[:4]), int(report_ym[4:])
+
+    # months to expose: Collated months + recent ARR months (cap 6)
+    months = sorted(set(hit2_tgt_m) | set(months_seen))[-6:]
+    report_ym = (max(hit2_tgt_m) if hit2_tgt_m else (max(months) if months else ''))
+
+    def compute_tva(ym):
+        ry, rm = int(ym[:4]), int(ym[4:])
+        arrT, arrA, det = {}, {}, {}
         for sid, cym in cohort_sellers.items():
-            arr = arr_by_sm.get((sid, report_ym))
+            arr = arr_by_sm.get((sid, ym))
             if arr is None:
-                continue  # not running this month
+                continue
             age = (ry - int(cym[:4])) * 12 + (rm - int(cym[4:]))
             if age < 0:
                 continue
-            mm = smap.get(sid, {})
-            gc, gm = mm.get('gc', 'Unassigned'), mm.get('gm', 'Unassigned')
-            gc2gm[gc] = gm
-            gc_arrT[gc] = gc_arrT.get(gc, 0) + target_for(age)
-            gc_arrA[gc] = gc_arrA.get(gc, 0) + arr
-            gc_det.setdefault(gc, []).append({'s': sid, 'n': name_by_s.get(sid, ''), 'age': 'M%d' % age, 'tgt': target_for(age), 'arr': arr})
+            gc = smap.get(sid, {}).get('gc', 'Unassigned')
+            if gc not in gls:
+                continue  # only canonical 1k-5k GLs
+            t = target_for(age)
+            arrT[gc] = arrT.get(gc, 0) + t
+            arrA[gc] = arrA.get(gc, 0) + arr
+            det.setdefault(gc, []).append({'s': sid, 'n': name_by_s.get(sid, ''), 'age': 'M%d' % age, 'tgt': t, 'arr': arr})
+        h2A, h2det = {}, {}
         for r in hitrows:
             if str(r.get('hit2')).strip() not in ('1', '1.0', 'True', 'true'):
                 continue
@@ -389,38 +395,46 @@ def main():
             except (ValueError, TypeError):
                 continue
             sid_h = str(r.get('seller_id') or '').strip()
-            gc = smap.get(sid_h, {}).get('gc', 'Unassigned')
-            gc_hit2A[gc] = gc_hit2A.get(gc, 0) + 1
-            gc_hit2_det.setdefault(gc, []).append({'s': sid_h, 'n': str(r.get('seller_name') or '') or name_by_s.get(sid_h, '')})
+            own = hit2_owner.get(sid_h)
+            gl = own['gl'] if own else 'Unassigned'   # HIT2 credited per the Handover sheet
+            if gl not in gls:
+                continue
+            h2A[gl] = h2A.get(gl, 0) + 1
+            h2det.setdefault(gl, []).append({'s': sid_h, 'n': str(r.get('seller_name') or '') or name_by_s.get(sid_h, '')})
+        h2t = hit2_tgt_m.get(ym, {})
 
-    # Canonical 1k-5k GLs = the GLs listed in the Collated target sheet (excludes revival/other
-    # GCs that 7753 may map a seller to, and excludes Unassigned).
-    gls = sorted(g for g in hit2_target if g != 'Unassigned')
-    byGL_rows = [{'name': g, 'hit2T': hit2_target.get(g), 'hit2A': gc_hit2A.get(g, 0),
-                  'arrT': round(gc_arrT.get(g, 0)), 'arrA': round(gc_arrA.get(g, 0)), 'n': len(gc_det.get(g, []))} for g in gls]
-    byGL_detail = {g: sorted(gc_det.get(g, []), key=lambda x: -x['arr']) for g in gls}
-    byGL_hit2 = {g: gc_hit2_det.get(g, []) for g in gls}
+        def mkrow(name, aT, aA, h2t_v, h2a_v, nrec):
+            aT, aA = round(aT), round(aA)
+            return {'name': name, 'hit2T': h2t_v, 'hit2A': h2a_v, 'arrT': aT, 'arrA': aA,
+                    'delta': max(0, round(0.85 * aT - aA)), 'n': nrec}
+        gl_rows = [mkrow(g, arrT.get(g, 0), arrA.get(g, 0), h2t.get(g), h2A.get(g, 0), len(det.get(g, []))) for g in gls]
+        gl_detail = {g: sorted(det.get(g, []), key=lambda x: -x['arr']) for g in gls}
+        gl_hit2 = {g: h2det.get(g, []) for g in gls}
+        # GM rollup
+        gT, gA, gh2T, gh2A, gdet, ghit2 = {}, {}, {}, {}, {}, {}
+        for g in gls:
+            gm = gc2gm_all.get(g) or 'Unassigned'
+            if gm == 'Unassigned':
+                continue
+            gT[gm] = gT.get(gm, 0) + arrT.get(g, 0)
+            gA[gm] = gA.get(gm, 0) + arrA.get(g, 0)
+            gh2A[gm] = gh2A.get(gm, 0) + h2A.get(g, 0)
+            gh2T[gm] = gh2T.get(gm, 0) + (h2t.get(g) or 0)
+            gdet.setdefault(gm, []).extend(det.get(g, []))
+            ghit2.setdefault(gm, []).extend(h2det.get(g, []))
+        gms = sorted(gT)
+        gm_rows = [mkrow(gm, gT.get(gm, 0), gA.get(gm, 0), gh2T.get(gm) or None, gh2A.get(gm, 0), len(gdet.get(gm, []))) for gm in gms]
+        gm_detail = {gm: sorted(gdet.get(gm, []), key=lambda x: -x['arr']) for gm in gms}
+        gm_hit2 = {gm: ghit2.get(gm, []) for gm in gms}
+        return {'byGL': {'rows': gl_rows, 'detail': gl_detail, 'hit2': gl_hit2},
+                'byGM': {'rows': gm_rows, 'detail': gm_detail, 'hit2': gm_hit2}}
 
-    gm_T, gm_A, gm_h2T, gm_h2A, gm_det, gm_hit2 = {}, {}, {}, {}, {}, {}
-    for g in gls:
-        gm = gc2gm_all.get(g) or 'Unassigned'
-        if gm == 'Unassigned':
-            continue  # drop the Unassigned bucket
-        gm_T[gm] = gm_T.get(gm, 0) + gc_arrT.get(g, 0)
-        gm_A[gm] = gm_A.get(gm, 0) + gc_arrA.get(g, 0)
-        gm_h2A[gm] = gm_h2A.get(gm, 0) + gc_hit2A.get(g, 0)
-        gm_h2T[gm] = gm_h2T.get(gm, 0) + (hit2_target.get(g) or 0)
-        gm_det.setdefault(gm, []).extend(gc_det.get(g, []))
-        gm_hit2.setdefault(gm, []).extend(gc_hit2_det.get(g, []))
-    gms = sorted(gm_T)
-    byGM_rows = [{'name': gm, 'hit2T': gm_h2T.get(gm), 'hit2A': gm_h2A.get(gm, 0),
-                  'arrT': round(gm_T.get(gm, 0)), 'arrA': round(gm_A.get(gm, 0)), 'n': len(gm_det.get(gm, []))} for gm in gms]
-    byGM_detail = {gm: sorted(gm_det.get(gm, []), key=lambda x: -x['arr']) for gm in gms}
-    byGM_hit2 = {gm: gm_hit2.get(gm, []) for gm in gms}
+    by_month = {ym: compute_tva(ym) for ym in months}
+    print(f'[cohort] TVA months {months} · report {report_ym} · {len(gls)} GLs')
 
-    cohort = {'mcols': mcols, 'target': target, 'rows': cohort_rows, 'detail': cohort_detail, 'reportMonth': report_ym,
-              'byGM': {'rows': byGM_rows, 'detail': byGM_detail, 'hit2': byGM_hit2},
-              'byGL': {'rows': byGL_rows, 'detail': byGL_detail, 'hit2': byGL_hit2}}
+    cohort = {'mcols': mcols, 'target': target, 'rows': cohort_rows, 'detail': cohort_detail,
+              'reportMonth': report_ym,
+              'tva': {'months': months, 'reportMonth': report_ym, 'byMonth': by_month}}
 
     # ---- CHURN: sellers who moved HIT -> REVENUE (card 1880), spent >= ₹11,800 with tax after the
     # switch, AND whose last spend (card 10065) is > 21 days ago. Both must hold. ----
