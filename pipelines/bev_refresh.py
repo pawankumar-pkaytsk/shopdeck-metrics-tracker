@@ -14,7 +14,23 @@ Channel of a seller: meta = meta yest spend > ₹1; google = has a Google ad acc
 
 Run: cd ~/shopdeck-metrics-site && python3 ~/metabase-arr-refresh/bev_refresh.py --push
 """
-import json, os, sys, subprocess, urllib.request, datetime
+import json, os, sys, subprocess, urllib.request, urllib.parse, datetime, glob, re
+
+
+def read_sheet_sa(sid, rng):
+    """Read a Google Sheet range via the service account (GOOGLE_SA_KEY env or local key file)."""
+    from google.oauth2 import service_account
+    import google.auth.transport.requests as gtr
+    if os.environ.get('GOOGLE_SA_KEY'):
+        cred = service_account.Credentials.from_service_account_info(
+            json.loads(os.environ['GOOGLE_SA_KEY']), scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+    else:
+        path = glob.glob(os.path.expanduser('~/Downloads/metrics-tracker-automation-*.json'))
+        cred = service_account.Credentials.from_service_account_file(
+            path[0], scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+    cred.refresh(gtr.Request())
+    u = f"https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/{urllib.parse.quote(rng)}"
+    return json.loads(urllib.request.urlopen(urllib.request.Request(u, headers={'Authorization': 'Bearer ' + cred.token}), timeout=120).read()).get('values', [])
 
 ARR_CARD = 10892
 HIT_CARD = 10453
@@ -279,23 +295,20 @@ def main():
             cohort_sellers[sid] = ym
 
     # seller -> GC/GM (card 7753)
-    clean = lambda v: (str(v or '').strip() if str(v or '').strip() not in ('', '-') else 'Unassigned')
+    clean = lambda v: (re.sub(r'\s+', ' ', str(v or '').strip()) if str(v or '').strip() not in ('', '-') else 'Unassigned')
     smap = {}
     for r in req(f"{url}/api/card/{COHORT_MAP_CARD}/query/json", 'POST', {}, H):
         sid = str(r.get('seller_id') or '').strip()
         if sid:
             smap[sid] = {'gc': clean(r.get('growth_consultant_name')), 'gm': clean(r.get('growth_manager_name'))}
 
-    # seller-level ARR (card 7336) -> cohort cells + GM/GL cells (avg arr by age) with per-cell drilldown
+    # seller-level ARR (card 7336): cohort age-matrix detail (top table) + per-(seller,month) ARR
     arr_rows = req(f"{url}/api/card/{COHORT_ARR_CARD}/query/json", 'POST', {}, H)
     seen_arr = set()
-    cohort_detail, gm_cells, gl_cells = {}, {}, {}
-    gm_sellers, gl_sellers = {}, {}
+    cohort_detail = {}
+    arr_by_sm, name_by_s, months_seen = {}, {}, set()
     for r in arr_rows:
         sid = str(r.get('seller_id') or '').strip()
-        cym = cohort_sellers.get(sid)
-        if not cym:
-            continue
         try:
             aym = str(int(r.get('year_month')))
         except (TypeError, ValueError):
@@ -306,37 +319,94 @@ def main():
         arr_v = r.get('arr')
         if arr_v is None:
             continue
-        age = (int(aym[:4]) - int(cym[:4])) * 12 + (int(aym[4:]) - int(cym[4:]))
-        if age < 0 or age > 6:
-            continue
-        mk = 'M%d' % age
-        rec = {'s': sid, 'n': str(r.get('company_name') or ''), 'arr': round(fnum(arr_v))}
-        mm = smap.get(sid, {})
-        gc, gm = mm.get('gc', 'Unassigned'), mm.get('gm', 'Unassigned')
-        cohort_detail.setdefault(cym, {}).setdefault(mk, []).append(rec)
-        gm_cells.setdefault(gm, {}).setdefault(mk, []).append(rec)
-        gl_cells.setdefault(gc, {}).setdefault(mk, []).append(rec)
-        gm_sellers.setdefault(gm, set()).add(sid)
-        gl_sellers.setdefault(gc, set()).add(sid)
+        name_by_s[sid] = str(r.get('company_name') or '')
+        arr_by_sm[(sid, aym)] = round(fnum(arr_v))
+        cym = cohort_sellers.get(sid)
+        if cym:
+            months_seen.add(aym)
+            age = (int(aym[:4]) - int(cym[:4])) * 12 + (int(aym[4:]) - int(cym[4:]))
+            if 0 <= age <= 6:
+                cohort_detail.setdefault(cym, {}).setdefault('M%d' % age, []).append(
+                    {'s': sid, 'n': name_by_s[sid], 'arr': arr_by_sm[(sid, aym)]})
+    for k in cohort_detail:
+        for mk in cohort_detail[k]:
+            cohort_detail[k][mk].sort(key=lambda x: -x['arr'])
 
-    def mgr_rows(cells, sellers):
-        out = []
-        for name in sorted(cells):
-            v = {}
-            for mk in mcols:
-                lst = cells[name].get(mk)
-                v[mk] = round(sum(x['arr'] for x in lst) / len(lst)) if lst else None
-            out.append({'ym': name, 'n': len(sellers.get(name, ())), 'v': v})
-        return out
-    gm_rows, gl_rows = mgr_rows(gm_cells, gm_sellers), mgr_rows(gl_cells, gl_sellers)
+    # ---- GL/GM Target vs Achievement (1k-5k, report month) ----
+    # HIT2 target per GC + report month from the 'Collated' sheet
+    hit2_target, report_ym = {}, ''
+    try:
+        rows_c = read_sheet_sa('1cV0DptEcl-HfamWP_6k6oAmLqYliUvo21hDKwWkqq2s', "'Collated'!A2:D")
+        best = (0, 0)
+        for row in rows_c:
+            try:
+                best = max(best, (int(row[3]), int(row[2])))
+            except (ValueError, TypeError, IndexError):
+                continue
+        report_ym = ('%d%02d' % best) if best != (0, 0) else (max(months_seen) if months_seen else '')
+        for row in rows_c:
+            try:
+                if int(row[3]) == int(report_ym[:4]) and int(row[2]) == int(report_ym[4:]):
+                    hit2_target[clean(row[0])] = int(float(row[1]))
+            except (ValueError, TypeError, IndexError):
+                continue
+    except Exception as _e:
+        report_ym = max(months_seen) if months_seen else ''
+        print('[cohort] Collated sheet read failed:', _e)
+    print(f'[cohort] report month {report_ym} · {len(hit2_target)} GC HIT2 targets')
 
-    for d in (cohort_detail, gm_cells, gl_cells):
-        for k in d:
-            for mk in d[k]:
-                d[k][mk].sort(key=lambda x: -x['arr'])
-    cohort = {'mcols': mcols, 'target': target, 'rows': cohort_rows, 'detail': cohort_detail,
-              'byGM': {'rows': gm_rows, 'detail': gm_cells},
-              'byGL': {'rows': gl_rows, 'detail': gl_cells}}
+    def target_for(age):
+        return target.get('M%d' % min(max(age, 0), 5)) or 0
+
+    gc_arrT, gc_arrA, gc_det, gc_hit2A, gc2gm = {}, {}, {}, {}, {}
+    if report_ym:
+        ry, rm = int(report_ym[:4]), int(report_ym[4:])
+        for sid, cym in cohort_sellers.items():
+            arr = arr_by_sm.get((sid, report_ym))
+            if arr is None:
+                continue  # not running this month
+            age = (ry - int(cym[:4])) * 12 + (rm - int(cym[4:]))
+            if age < 0:
+                continue
+            mm = smap.get(sid, {})
+            gc, gm = mm.get('gc', 'Unassigned'), mm.get('gm', 'Unassigned')
+            gc2gm[gc] = gm
+            gc_arrT[gc] = gc_arrT.get(gc, 0) + target_for(age)
+            gc_arrA[gc] = gc_arrA.get(gc, 0) + arr
+            gc_det.setdefault(gc, []).append({'s': sid, 'n': name_by_s.get(sid, ''), 'age': 'M%d' % age, 'tgt': target_for(age), 'arr': arr})
+        for r in hitrows:
+            if str(r.get('hit2')).strip() not in ('1', '1.0', 'True', 'true'):
+                continue
+            try:
+                if int(r.get('hit2_year')) != ry or int(r.get('hit2_month')) != rm:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            gc = smap.get(str(r.get('seller_id') or '').strip(), {}).get('gc', 'Unassigned')
+            gc_hit2A[gc] = gc_hit2A.get(gc, 0) + 1
+
+    gls = sorted(set(gc_arrT) | set(gc_hit2A) | set(hit2_target))
+    byGL_rows = [{'name': g, 'hit2T': hit2_target.get(g), 'hit2A': gc_hit2A.get(g, 0),
+                  'arrT': round(gc_arrT.get(g, 0)), 'arrA': round(gc_arrA.get(g, 0)), 'n': len(gc_det.get(g, []))} for g in gls]
+    byGL_detail = {g: sorted(gc_det.get(g, []), key=lambda x: -x['arr']) for g in gls}
+
+    gm_T, gm_A, gm_h2T, gm_h2A, gm_det = {}, {}, {}, {}, {}
+    for g in gls:
+        gm = gc2gm.get(g, 'Unassigned')
+        gm_T[gm] = gm_T.get(gm, 0) + gc_arrT.get(g, 0)
+        gm_A[gm] = gm_A.get(gm, 0) + gc_arrA.get(g, 0)
+        gm_h2A[gm] = gm_h2A.get(gm, 0) + gc_hit2A.get(g, 0)
+        if hit2_target.get(g) is not None:
+            gm_h2T[gm] = gm_h2T.get(gm, 0) + hit2_target[g]
+        gm_det.setdefault(gm, []).extend(gc_det.get(g, []))
+    gms = sorted(set(gm_T) | set(gm_h2A))
+    byGM_rows = [{'name': gm, 'hit2T': gm_h2T.get(gm), 'hit2A': gm_h2A.get(gm, 0),
+                  'arrT': round(gm_T.get(gm, 0)), 'arrA': round(gm_A.get(gm, 0)), 'n': len(gm_det.get(gm, []))} for gm in gms]
+    byGM_detail = {gm: sorted(gm_det.get(gm, []), key=lambda x: -x['arr']) for gm in gms}
+
+    cohort = {'mcols': mcols, 'target': target, 'rows': cohort_rows, 'detail': cohort_detail, 'reportMonth': report_ym,
+              'byGM': {'rows': byGM_rows, 'detail': byGM_detail},
+              'byGL': {'rows': byGL_rows, 'detail': byGL_detail}}
 
     # ---- CHURN: sellers who moved HIT -> REVENUE (card 1880), spent >= ₹11,800 with tax after the
     # switch, AND whose last spend (card 10065) is > 21 days ago. Both must hold. ----

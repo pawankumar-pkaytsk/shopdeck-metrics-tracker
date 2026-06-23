@@ -20,6 +20,7 @@ jobs:
       METABASE_USER_EMAIL: ${{ secrets.METABASE_USER_EMAIL }}
       METABASE_PASSWORD: ${{ secrets.METABASE_PASSWORD }}
       REPO_DIR: ${{ github.workspace }}
+      GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,6 +29,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Install deps
+        run: pip install google-auth requests
 
       - name: ARR (output)
         run: python pipelines/output_refresh.py
