@@ -106,20 +106,49 @@ def main():
     except Exception as _e:
         print('[spend] full-spend merge failed (keeping 10189 only):', _e)
 
-    # HITS seller -> GL(=GC)/GM/name mapping from card 10892 (same filtered universe as ARR).
-    # Used by the 1K-5K and Good Seller teams in Troubleshoot Compliance.
-    hits = req(f"{url}/api/card/10892/query/json", 'POST', {}, H)
+    # HITS seller -> GL(=GC)/GM/name mapping for the 1K-5K and Good Seller teams.
+    # Universe: the 1K-5K cohort per card 11020 logic = hit_master_data where (team='HITS' OR hit2=1).
+    # The good_seller flag splits 1K-5K (good=0) from the Good Seller team (good=1).
+    # GL/GM names come from the live seller-manager mapping (card 7753):
+    #   GC  = growth_consultant_name, falling back to growth_lead_name when null/'-'
+    #   GM  = growth_manager_name
+    # This replaces the stale hardcoded card-10892 snapshot, which was missing ~36 sellers.
+    import re as _re, urllib.parse
+    _norm = lambda v: _re.sub(r'\s+', ' ', str(v or '').strip())
+
+    cohort_sql = ("SELECT seller_id, ANY_VALUE(seller_name) AS n, "
+                  "MAX(CASE WHEN CAST(good_seller AS STRING) = '1' THEN 1 ELSE 0 END) AS good "
+                  "FROM csv_upload.hit_master_data WHERE (team = 'HITS' OR hit2 = 1) GROUP BY seller_id")
+    cbody = urllib.parse.urlencode({"query": json.dumps({"database": 6, "type": "native", "native": {"query": cohort_sql}})}).encode()
+    creq = urllib.request.Request(url + "/api/dataset/json", data=cbody, method='POST',
+                                  headers={'X-Metabase-Session': tok, 'Content-Type': 'application/x-www-form-urlencoded'})
+    cohort = json.loads(urllib.request.urlopen(creq, timeout=300).read())
+
+    m7753 = {}
+    for r in req(f"{url}/api/card/7753/query/json", 'POST', {}, H):
+        sid = str(r.get('seller_id') or '').strip()
+        if sid:
+            m7753[sid] = r
+
+    def _gl(r):
+        gc = _norm(r.get('growth_consultant_name'))
+        if gc in ('', '-'):
+            gc = _norm(r.get('growth_lead_name'))
+        return gc if gc not in ('', '-') else 'Unassigned'
+
     hits_map = {}
-    for r in hits:
+    for r in cohort:
         sid = str(r.get('seller_id') or '').strip()
         if not sid:
             continue
-        hits_map[sid] = {
-            'n':  str(r.get('seller_name') or ''),
-            'gc': str(r.get('gc') or '').strip(),   # GL name (col F of 5K sheet)
-            'gm': str(r.get('gm') or '').strip(),   # GM name (col G)
-        }
-    print(f"[hits] card 10892: {len(hits_map)} unique sellers mapped (GL/GM)")
+        mm = m7753.get(sid)
+        gc = _gl(mm) if mm else 'Unassigned'
+        gm = (_norm(mm.get('growth_manager_name')) if mm else '') or 'Unassigned'
+        if gm == '-':
+            gm = 'Unassigned'
+        hits_map[sid] = {'n': _norm(r.get('n')), 'gc': gc, 'gm': gm, 'good': int(r.get('good') or 0)}
+    _ng = sum(1 for v in hits_map.values() if v['good'])
+    print(f"[hits] cohort {len(hits_map)} sellers (1K-5K {len(hits_map) - _ng} · Good Seller {_ng}) mapped via card 7753")
 
     # best PnL visibility (card 11011): seller -> best_source, best_w1_pnl_value, w1_spend
     pnl = {}
