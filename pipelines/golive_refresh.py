@@ -81,14 +81,17 @@ def main():
         c = cohort_of(s['a'])
         if c:
             coh[c] += 1
+    # M3+ (old never-live backlog) is excluded from the "yet to golive" list per request.
+    kept_coh = {k: coh[k] for k in ('M0', 'M1', 'M2', 'M3')}
     mtd_live = sum(1 for s in live if (s.get('g') or '')[:7] == cur_month)
     summary = {
         'asOf': cur_month,
         'totalA2H': len(a2h_done),
-        'live': len(live),               # A2H done + any marketing spend (has go_live)
-        'yetToGolive': len(pending),     # A2H done, never spent
-        'mtdLive': mtd_live,             # first spend landed in current month
-        'cohort': coh,                   # yet-to-golive bucketed by A2H age
+        'live': len(live),                       # A2H done + any marketing spend (has go_live)
+        'yetToGolive': sum(kept_coh.values()),   # A2H done, never spent (M0-M3 only)
+        'mtdLive': mtd_live,                     # first spend landed in current month
+        'cohort': kept_coh,                      # yet-to-golive bucketed by A2H age (M3+ excluded)
+        'm3plusExcluded': coh['M3+'],            # count removed from the list (reference)
     }
     print(f"[golive] summary: A2H={summary['totalA2H']} live={summary['live']} "
           f"yetToGolive={summary['yetToGolive']} mtdLive={summary['mtdLive']} cohort={coh}")
