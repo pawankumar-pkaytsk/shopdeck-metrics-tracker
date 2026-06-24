@@ -57,8 +57,45 @@ def main():
         if prev is None or (not prev.get('g') and gol):
             sellers[sid] = {'a': a2h, 'g': gol}
 
+    # --- Ground-truth summary straight from card 7682 (the full universe) ---
+    # go_live_date in 7682 = first day marketing_spend>0, so "live" == actual spend ever.
+    # This is owner-independent (does NOT depend on the core assignment sheet), so it
+    # reconciles exactly with the Metabase question and is the single source of truth.
+    today = datetime.date.today()
+    cur_idx = today.year * 12 + (today.month - 1)
+    cur_month = today.strftime('%Y-%m')
+
+    def cohort_of(a):
+        try:
+            d = datetime.date.fromisoformat(a[:10])
+        except (ValueError, TypeError):
+            return None
+        di = cur_idx - (d.year * 12 + (d.month - 1))
+        return 'M0' if di <= 0 else 'M1' if di == 1 else 'M2' if di == 2 else 'M3' if di == 3 else 'M3+'
+
+    a2h_done = [s for s in sellers.values() if s.get('a')]
+    live = [s for s in a2h_done if s.get('g')]
+    pending = [s for s in a2h_done if not s.get('g')]
+    coh = {k: 0 for k in ('M0', 'M1', 'M2', 'M3', 'M3+')}
+    for s in pending:
+        c = cohort_of(s['a'])
+        if c:
+            coh[c] += 1
+    mtd_live = sum(1 for s in live if (s.get('g') or '')[:7] == cur_month)
+    summary = {
+        'asOf': cur_month,
+        'totalA2H': len(a2h_done),
+        'live': len(live),               # A2H done + any marketing spend (has go_live)
+        'yetToGolive': len(pending),     # A2H done, never spent
+        'mtdLive': mtd_live,             # first spend landed in current month
+        'cohort': coh,                   # yet-to-golive bucketed by A2H age
+    }
+    print(f"[golive] summary: A2H={summary['totalA2H']} live={summary['live']} "
+          f"yetToGolive={summary['yetToGolive']} mtdLive={summary['mtdLive']} cohort={coh}")
+
     out = {
         'generatedAt': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'summary': summary,
         'sellers': sellers,
     }
     json.dump(out, open(OUT, 'w'), separators=(',', ':'))
