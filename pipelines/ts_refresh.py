@@ -116,9 +116,15 @@ def main():
     import re as _re, urllib.parse
     _norm = lambda v: _re.sub(r'\s+', ' ', str(v or '').strip())
 
-    cohort_sql = ("SELECT seller_id, ANY_VALUE(seller_name) AS n, "
-                  "MAX(CASE WHEN CAST(good_seller AS STRING) = '1' THEN 1 ELSE 0 END) AS good "
-                  "FROM csv_upload.hit_master_data WHERE (team = 'HITS' OR hit2 = 1) GROUP BY seller_id")
+    # CURRENT team only: take each seller's latest hit_master_data row (by hit_year, hit_month)
+    # and keep team='HITS'. This drops sellers who were once HITS/HIT2 but have since moved teams
+    # (e.g. hit2=1 rows with a now-NULL/other team) so the list is the live 1K-5K roster.
+    cohort_sql = ("WITH ranked AS (SELECT seller_id, seller_name, team, good_seller, "
+                  "ROW_NUMBER() OVER (PARTITION BY seller_id ORDER BY hit_year DESC, hit_month DESC) AS rn "
+                  "FROM csv_upload.hit_master_data) "
+                  "SELECT seller_id, seller_name AS n, "
+                  "CASE WHEN CAST(good_seller AS STRING) = '1' THEN 1 ELSE 0 END AS good "
+                  "FROM ranked WHERE rn = 1 AND team = 'HITS'")
     cbody = urllib.parse.urlencode({"query": json.dumps({"database": 6, "type": "native", "native": {"query": cohort_sql}})}).encode()
     creq = urllib.request.Request(url + "/api/dataset/json", data=cbody, method='POST',
                                   headers={'X-Metabase-Session': tok, 'Content-Type': 'application/x-www-form-urlencoded'})
