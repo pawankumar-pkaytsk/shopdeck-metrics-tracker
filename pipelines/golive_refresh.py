@@ -101,6 +101,23 @@ def main():
     pending_analysis = {}
 
     try:
+        # card 9688: call dump with summary + recording_url + caller_name, keyed by call_id
+        c9688 = req(f"{url}/api/card/9688/query/json", 'POST', {}, H)
+        call9688 = {}
+        for r in c9688:
+            cid = str(r.get('call_id') or '').strip()
+            if cid:
+                call9688[cid] = {
+                    'summary': str(r.get('summary') or ''),
+                    'recording': str(r.get('recording_url') or ''),
+                    'callerName': str(r.get('caller_name') or ''),
+                }
+        print(f"[golive-analysis] card 9688: {len(call9688)} calls indexed")
+    except Exception as _e:
+        print(f"[golive-analysis] card 9688 failed: {_e}")
+        call9688 = {}
+
+    try:
         # calls from card 10206: count calls per seller after their A2H date
         calls_raw = req(f"{url}/api/card/10206/query/json", 'POST', {}, H)
         for r in calls_raw:
@@ -114,9 +131,13 @@ def main():
                 rec['calls'] = rec.get('calls', 0) + 1
                 # keep latest call info (by date) after A2H
                 if not rec.get('lastCallDate') or cd > rec.get('lastCallDate', ''):
+                    cid = str(r.get('call_id') or '').strip()
+                    c9 = call9688.get(cid, {})
                     rec['lastActionable'] = str(r.get('actionables') or '')
-                    rec['lastCallBy'] = str(r.get('call_from') or '')
                     rec['lastCallDate'] = cd
+                    rec['gmName'] = str(r.get('gm_name') or '')
+                    rec['lastCallSummary'] = c9.get('summary', '')
+                    rec['recordingUrl'] = c9.get('recording', '')
         print(f"[golive-analysis] calls fetched for {sum(1 for v in pending_analysis.values() if v.get('calls'))} sellers")
     except Exception as _e:
         print(f"[golive-analysis] card 10206 failed: {_e}")
