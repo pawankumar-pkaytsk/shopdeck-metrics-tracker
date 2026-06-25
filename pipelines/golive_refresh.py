@@ -96,10 +96,55 @@ def main():
     print(f"[golive] summary: A2H={summary['totalA2H']} live={summary['live']} "
           f"yetToGolive={summary['yetToGolive']} mtdLive={summary['mtdLive']} cohort={coh}")
 
+    # ---- Yet to Golive Analysis: per-pending-seller call count + ad_account_blocked tasks ----
+    pending_sids = {sid for sid, s in sellers.items() if s.get('a') and not s.get('g')}
+    pending_analysis = {}
+
+    try:
+        # calls from card 10206: count calls per seller after their A2H date
+        calls_raw = req(f"{url}/api/card/10206/query/json", 'POST', {}, H)
+        for r in calls_raw:
+            sid = str(r.get('seller_id') or '').strip()
+            if sid not in pending_sids:
+                continue
+            cd = str(r.get('call_date') or '')[:10]
+            a2h = sellers[sid].get('a') or ''
+            if cd and a2h and cd >= a2h:
+                rec = pending_analysis.setdefault(sid, {})
+                rec['calls'] = rec.get('calls', 0) + 1
+                # keep latest actionable after A2H
+                if not rec.get('lastActionable') or cd > rec.get('lastCallDate', ''):
+                    rec['lastActionable'] = str(r.get('actionables') or '')
+                    rec['lastCallDate'] = cd
+        print(f"[golive-analysis] calls fetched for {sum(1 for v in pending_analysis.values() if v.get('calls'))} sellers")
+    except Exception as _e:
+        print(f"[golive-analysis] card 10206 failed: {_e}")
+
+    try:
+        # tasks from card 11036: ad_account_blocked per seller
+        tasks_raw = req(f"{url}/api/card/11036/query/json", 'POST', {}, H)
+        for r in tasks_raw:
+            sid = str(r.get('seller_id') or '').strip()
+            if sid not in pending_sids:
+                continue
+            if str(r.get('sub_type') or '').strip().lower() != 'ad_account_blocked':
+                continue
+            status = str(r.get('status') or '').strip().lower()
+            rec = pending_analysis.setdefault(sid, {})
+            existing = rec.get('adBlocked')
+            # prefer pending (unresolved) over completed; take latest created
+            if not existing or status == 'pending' or (existing.get('status') != 'pending' and status == 'completed'):
+                rec['adBlocked'] = {'id': str(r.get('id') or ''), 'status': status,
+                                    'created': str(r.get('task_created_at') or '')[:10]}
+        print(f"[golive-analysis] ad_blocked found for {sum(1 for v in pending_analysis.values() if v.get('adBlocked'))} sellers")
+    except Exception as _e:
+        print(f"[golive-analysis] card 11036 failed: {_e}")
+
     out = {
         'generatedAt': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
         'summary': summary,
         'sellers': sellers,
+        'pendingAnalysis': pending_analysis,
     }
     json.dump(out, open(OUT, 'w'), separators=(',', ':'))
     print(f"[out] {OUT} ({os.path.getsize(OUT)} bytes) · {len(sellers)} sellers")

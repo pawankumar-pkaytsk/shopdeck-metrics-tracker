@@ -89,10 +89,9 @@ def main():
     gts = load('google_ts_data.json')
     task = load('task_data.json')
 
-    good = set(g.strip().lower() for g in ts.get('goodSellerGLs', []))
     hits = ts.get('hitsMap', {})
-    # 1k-5k team = hits sellers whose GL is not a good-seller GL
-    team = {sid: m for sid, m in hits.items() if (m.get('gc') or '').strip().lower() not in good}
+    # 1k-5k team = hitsMap sellers with good=0 (as set by hit_master_data good_seller flag)
+    team = {sid: m for sid, m in hits.items() if not m.get('good')}
     sids = set(team.keys())
     sc = scaling.get('sellers', {})
 
@@ -135,11 +134,13 @@ def main():
             a_g, s_g = fnum(r.get('arr_google')), fnum(r.get('spend_google'))
             am += a_m; sm += s_m; ag += a_g; sg += s_g
             if a_m or s_m or a_g or s_g:
-                drows.append([sid, round(a_m), round(s_m), round(a_g), round(s_g)])
+                drows.append([sid, round(a_m), round(s_m), round(a_g), round(s_g),
+                              round(a_m + a_g), round(s_m + s_g)])
                 if sid not in seller_meta:
                     seller_meta[sid] = {'n': r.get('seller_name') or team.get(sid, {}).get('n') or '',
                                         'gl': r.get('gc') or team.get(sid, {}).get('gc') or ''}
-        perf_by_date[d] = {'am': round(am), 'sm': round(sm), 'ag': round(ag), 'sg': round(sg), 'rows': drows}
+        perf_by_date[d] = {'am': round(am), 'sm': round(sm), 'ag': round(ag), 'sg': round(sg),
+                           'ao': round(am + ag), 'so': round(sm + sg), 'rows': drows}
 
     arr_meta_detail, arr_google_detail = [], []
     arr_meta = spend_meta = arr_google = spend_google = 0.0
@@ -436,8 +437,9 @@ def main():
               'reportMonth': report_ym,
               'tva': {'months': months, 'reportMonth': report_ym, 'byMonth': by_month}}
 
-    # ---- CHURN: sellers who moved HIT -> REVENUE (card 1880), spent >= ₹11,800 with tax after the
-    # switch, AND whose last spend (card 10065) is > 21 days ago. Both must hold. ----
+    # ---- CHURN: sellers who moved HIT -> REVENUE (card 1880), no spend for > 21 days ----
+    # BEV card: only days gate (rev_spend gate removed per request).
+    # TvA column: both gates (rev_spend >= 11800 AND days > 21) — old logic for GL/GM breakdown.
     CHURN_REV_SPEND = 11800
     CHURN_DAYS = 21
     last_spend = {}
@@ -454,21 +456,20 @@ def main():
         wk.setdefault(sid, []).append({'st': str(r.get('start_date') or '')[:10],
                                        'tm': str(r.get('team_mapping') or '').strip().upper(),
                                        'sp': fnum(r.get('marketing_spend_tax_'))})
-    churned = []
+    churned = []          # BEV card: days > 21 only (no rev_spend gate)
+    churned_tva = []      # TvA column: old logic — rev_spend >= 11800 AND days > 21
     for sid, weeks in wk.items():
-        if sid not in sids:                                      # logic 3: only current 1k-5k team sellers
+        if sid not in sids:
             continue
-        hits = [w for w in weeks if w['tm'] == 'HIT' and w['st']]
+        _hits = [w for w in weeks if w['tm'] == 'HIT' and w['st']]
         revs = [w for w in weeks if w['tm'] == 'REVENUE' and w['st']]
-        if not hits or not revs:
+        if not _hits or not revs:
             continue
-        first_hit = min(w['st'] for w in hits)
-        rev_after = [w for w in revs if w['st'] >= first_hit]   # REVENUE weeks after the HIT->REVENUE switch
+        first_hit = min(w['st'] for w in _hits)
+        rev_after = [w for w in revs if w['st'] >= first_hit]
         if not rev_after:
             continue
         rev_spend = sum(w['sp'] for w in rev_after)
-        if rev_spend < CHURN_REV_SPEND:                          # logic 1
-            continue
         ls = last_spend.get(sid)
         if not ls or not ls['d']:
             continue
@@ -477,16 +478,32 @@ def main():
         except ValueError:
             continue
         days = (today - lsd).days
-        if days <= CHURN_DAYS:                                   # logic 2
+        if days <= CHURN_DAYS:
             continue
         churn_date = lsd + datetime.timedelta(days=CHURN_DAYS)
-        churned.append({'s': sid, 'n': ls['c'] or team.get(sid, {}).get('n', ''),
-                        'revSpend': round(rev_spend), 'lastSpend': ls['d'], 'days': days,
-                        'churnDate': churn_date.isoformat(), 'churnMonth': churn_date.isoformat()[:7]})
+        entry = {'s': sid, 'n': ls['c'] or team.get(sid, {}).get('n', ''),
+                 'revSpend': round(rev_spend), 'lastSpend': ls['d'], 'days': days,
+                 'churnDate': churn_date.isoformat(), 'churnMonth': churn_date.isoformat()[:7]}
+        churned.append(entry)
+        if rev_spend >= CHURN_REV_SPEND:
+            churned_tva.append(entry)
     churned.sort(key=lambda x: x['churnDate'], reverse=True)
+    churned_tva.sort(key=lambda x: x['churnDate'], reverse=True)
     from collections import Counter as _C
-    churn = {'value': len(churned), 'churned': churned, 'revSpendGate': CHURN_REV_SPEND, 'daysGate': CHURN_DAYS,
+    churn = {'value': len(churned), 'churned': churned, 'daysGate': CHURN_DAYS,
              'byMonth': dict(_C(x['churnMonth'] for x in churned))}
+
+    # Churn per GL/GM for TvA column (old logic: rev_spend >= 11800 AND days > 21)
+    churned_tva_by_gl = {}
+    for c in churned_tva:
+        gc = smap.get(c['s'], {}).get('gc', 'Unassigned')
+        churned_tva_by_gl.setdefault(gc, []).append(c['s'])
+    for ym, tva_data in by_month.items():
+        for row in tva_data['byGL']['rows']:
+            row['churn'] = len(churned_tva_by_gl.get(row['name'], []))
+        for row in tva_data['byGM']['rows']:
+            cnt = sum(len(churned_tva_by_gl.get(g, [])) for g in gls if gc2gm_all.get(g) == row['name'])
+            row['churn'] = cnt
 
     out = {
         'generatedAt': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
@@ -501,6 +518,8 @@ def main():
             'spend_meta':  {'value': round(spend_meta), 'detail': arr_meta_detail},
             'arr_google':  {'value': round(arr_google), 'detail': arr_google_detail},
             'spend_google':{'value': round(spend_google), 'detail': arr_google_detail},
+            'arr_overall': {'value': round(arr_meta + arr_google), 'detail': sorted(arr_meta_detail + arr_google_detail, key=lambda x: -x['arr'])},
+            'spend_overall':{'value': round(spend_meta + spend_google), 'detail': sorted(arr_meta_detail + arr_google_detail, key=lambda x: -x['arr'])},
             'sl_meta':     {'pct': sl_meta_pct, 'num': meta_sp, 'den': assigned, 'detail': sl_detail},
             'sl_google':   {'pct': sl_google_pct, 'num': goog_sp, 'den': goog_live, 'detail': sl_detail},
             'sl_blended':  {'pct': sl_blended_pct, 'num': blend_sp, 'den': assigned, 'detail': sl_detail},
