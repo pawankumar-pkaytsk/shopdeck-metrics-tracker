@@ -165,6 +165,15 @@ def main():
             ad_accounts[sid] = aid
     print(f"[adacct] card 11118: {len(ad_accounts)} sellers with ad account id")
 
+    # auto-ts enrollment status (card 9963): seller_id -> status (active/graduated/control/paused)
+    auto_ts_status = {}
+    for r in req(f"{url}/api/card/9963/query/json", 'POST', {}, H):
+        sid = str(r.get('seller_id') or '').strip()
+        st = str(r.get('status') or '').strip().lower()
+        if sid and st:
+            auto_ts_status[sid] = st
+    print(f"[autots] card 9963: {len(auto_ts_status)} sellers with auto-ts status")
+
     # best PnL visibility (card 11011): seller -> best_source, best_w1_pnl_value, w1_spend
     pnl = {}
     for r in req(f"{url}/api/card/11011/query/json", 'POST', {}, H):
@@ -187,6 +196,7 @@ def main():
         'hitsMap': hits_map,
         'pnl': pnl,
         'adAccounts': ad_accounts,
+        'autoTsStatus': auto_ts_status,
     }
     json.dump(out, open(OUT, 'w'), separators=(',', ':'))
     print(f"[out] {OUT} ({os.path.getsize(OUT)} bytes) · {len(sellers)} sellers")
