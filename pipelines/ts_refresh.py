@@ -156,6 +156,15 @@ def main():
     _ng = sum(1 for v in hits_map.values() if v['good'])
     print(f"[hits] cohort {len(hits_map)} sellers (1K-5K {len(hits_map) - _ng} · Good Seller {_ng}) mapped via card 7753")
 
+    # ad account id (card 11118): seller_id -> facebook_ad_account_id
+    ad_accounts = {}
+    for r in req(f"{url}/api/card/11118/query/json", 'POST', {}, H):
+        sid = str(r.get('seller_id') or '').strip()
+        aid = str(r.get('facebook_ad_account_id') or '').strip()
+        if sid and aid:
+            ad_accounts[sid] = aid
+    print(f"[adacct] card 11118: {len(ad_accounts)} sellers with ad account id")
+
     # best PnL visibility (card 11011): seller -> best_source, best_w1_pnl_value, w1_spend
     pnl = {}
     for r in req(f"{url}/api/card/11011/query/json", 'POST', {}, H):
@@ -177,6 +186,7 @@ def main():
         'sellers': sellers,
         'hitsMap': hits_map,
         'pnl': pnl,
+        'adAccounts': ad_accounts,
     }
     json.dump(out, open(OUT, 'w'), separators=(',', ':'))
     print(f"[out] {OUT} ({os.path.getsize(OUT)} bytes) · {len(sellers)} sellers")
