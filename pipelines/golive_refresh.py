@@ -112,9 +112,10 @@ def main():
             if cd and a2h and cd >= a2h:
                 rec = pending_analysis.setdefault(sid, {})
                 rec['calls'] = rec.get('calls', 0) + 1
-                # keep latest actionable after A2H
-                if not rec.get('lastActionable') or cd > rec.get('lastCallDate', ''):
+                # keep latest call info (by date) after A2H
+                if not rec.get('lastCallDate') or cd > rec.get('lastCallDate', ''):
                     rec['lastActionable'] = str(r.get('actionables') or '')
+                    rec['lastCallBy'] = str(r.get('call_from') or '')
                     rec['lastCallDate'] = cd
         print(f"[golive-analysis] calls fetched for {sum(1 for v in pending_analysis.values() if v.get('calls'))} sellers")
     except Exception as _e:
