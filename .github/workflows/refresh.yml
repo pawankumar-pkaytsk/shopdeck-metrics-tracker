@@ -74,5 +74,5 @@ jobs:
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: team_Nv7Bqm9rCMXGjFA018pplRCW
-          VERCEL_PROJECT_ID: prj_v9e41pt0iUaXCTlwLwfkgvRPHqfT
+          VERCEL_PROJECT_ID: prj_YddUtFJTQvft3JUAArpDh9wsNr8l
         run: npx --yes vercel@latest --prod --yes --token "$VERCEL_TOKEN"
