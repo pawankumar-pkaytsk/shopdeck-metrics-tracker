@@ -4,3 +4,4 @@ public
 .claude
 *.bak.*
 .claude.json*
+snapshots
