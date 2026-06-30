@@ -30,16 +30,35 @@ let template = JSON.parse(html.match(/<script type="__bundler\/template">("[\s\S
     }
     const end = close + 5; // include })();
     const shim = `window.SheetsAPI = (function () {
+  var cfg = window.SHEETS_CONFIG || {};
+  /* Access allowlist for the Google sign-in gate. Any @ domain below, or any explicit email, may enter. */
+  var ALLOW_DOMAINS = ['blitzscale.co', 'shopdeck.com'];
+  var ALLOW_EMAILS = [];
+  var KEY = 'hits_auth_email';
+  var stored = null; try { stored = sessionStorage.getItem(KEY); } catch (e) {}
   var jc = {};
   function load(f) { if (jc[f]) return jc[f]; jc[f] = fetch(f, { cache: 'no-store' }).then(function (r) { if (!r.ok) throw new Error(f + ' not generated'); return r.json(); }).then(function (j) { return j.values || []; }); return jc[f]; }
   var FILE = { '1QCdVIkKa_4yMb1NZHSkIt50x4qoKaFlw2WXpQZnL6KM': 'daily_plan.json', '1ZLOcj648aYvVaEGHX_QHB1Qx3OMUT3K_eeW-SBUbCso': 'handover.json', '1eIbQU-odVp6lwBnawIIdSbpVHIrywy98Ib4RsZhEPgk': 'escalation.json' };
   function s2iso(s) { return new Date(Math.round((s - 25569) * 86400000)).toISOString().slice(0, 10); }
   function toISO(v) { if (v === null || v === undefined || v === '') return null; if (typeof v === 'number') return s2iso(v); var d = new Date(v); return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10); }
   function pr(r) { return { date: toISO(r[0]), gc: r[1] != null ? String(r[1]).trim() : '', gm: r[2] != null ? String(r[2]).trim() : '', assigned: Number(r[3]) || 0, live: Number(r[5]) || 0, spending: Number(r[7]) || 0 }; }
+  function allowed(email) { email = (email || '').toLowerCase(); if (!email) return false; if (ALLOW_EMAILS.indexOf(email) >= 0) return true; var dom = email.split('@')[1] || ''; return ALLOW_DOMAINS.indexOf(dom) >= 0; }
+  function waitForGIS() { return new Promise(function (res, rej) { var t = 0; (function c() { if (window.google && google.accounts && google.accounts.oauth2) return res(); if (t++ > 60) return rej(new Error('Google sign-in failed to load')); setTimeout(c, 100); })(); }); }
   return {
-    signIn: function () { return Promise.resolve('local'); },
-    isSignedIn: function () { return true; },
-    getUser: function () { return null; },
+    signIn: function () { return waitForGIS().then(function () { return new Promise(function (resolve, reject) {
+      var tc = google.accounts.oauth2.initTokenClient({ client_id: cfg.clientId, scope: 'openid email profile', callback: function (resp) {
+        if (resp.error) { reject(new Error(resp.error)); return; }
+        fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { Authorization: 'Bearer ' + resp.access_token } }).then(function (r) { return r.ok ? r.json() : null; }).then(function (u) {
+          var email = (u && u.email) || '';
+          if (allowed(email)) { try { sessionStorage.setItem(KEY, email); } catch (e) {} stored = email; resolve(email); }
+          else { reject(new Error('Access denied for ' + (email || 'this account') + '. Ask an admin to allowlist you.')); }
+        }).catch(function () { reject(new Error('Could not verify your Google account')); });
+      }, error_callback: function (err) { reject(new Error((err && err.type) || 'sign_in_cancelled')); } });
+      tc.requestAccessToken({ prompt: '' });
+    }); }); },
+    isSignedIn: function () { return !!stored; },
+    getUser: function () { return stored ? { email: stored, name: stored } : null; },
+    signOut: function () { try { sessionStorage.removeItem(KEY); } catch (e) {} stored = null; },
     getRows: function (start, end) { return load('spendinputs.json').then(function (vals) { return vals.map(pr).filter(function (row) { if (!row.date) return false; if (start && row.date < start) return false; if (end && row.date > end) return false; return true; }); }); },
     refresh: function (start, end) { jc = {}; return this.getRows(start, end); },
     getValues: function (id) { var f = FILE[id]; return f ? load(f) : Promise.resolve([]); }
@@ -48,8 +67,8 @@ let template = JSON.parse(html.match(/<script type="__bundler\/template">("[\s\S
     template = template.slice(0, s) + shim + template.slice(end);
   }
 }
-// 2) Bypass the Google gate (Clerk/ATLAS gates the embedded app).
-template = template.replace('const [authed, setAuthed] = useState(false)', 'const [authed, setAuthed] = useState(true)');
+// 2) Google sign-in gate: start unauthed (gate shows), but stay signed in for the session.
+template = template.replace('const [authed, setAuthed] = useState(false)', 'const [authed, setAuthed] = useState(window.SheetsAPI && window.SheetsAPI.isSignedIn ? window.SheetsAPI.isSignedIn() : false)');
 
 // decode + gunzip every manifest resource
 const res = {};
