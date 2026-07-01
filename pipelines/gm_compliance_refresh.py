@@ -1,28 +1,34 @@
 #!/usr/bin/env python3
 """Build gm_compliance_data.json for Central Reports -> GM Compliance.
 
-Per GM (HITS team only), collect the dates that let the dashboard count, for any
-client-selected date window (Today / Yesterday / Last 3 / Last 7 / custom range):
-  - T/S done   : HIT sellers whose LAST troubleshoot date falls in the window (card 10189)
-  - Golives    : HIT sellers whose go_live_date falls in the window (card 7682)
+Per GM, collect dates so the dashboard can count for any window (Today / Yesterday /
+Last 3 / Last 7 / custom):
+  - T/S done : troubleshoot EVENTS from card 2580 (submitted_at), split Auto vs Manual
+               by the seller's auto-TS tag (card 9963: tag = auto|manual; default manual)
+  - Golives  : card 7682 go_live_date (one per seller)
+Both are mapped to a GM via card 7753 (growth_manager_name).
 
-HITS team membership: card 11244 team_mapping == 'HIT'.
-GM per seller:        card 7753 growth_manager_name (fallback 'Unassigned').
-
-NOTE: card 10189 exposes only each seller's LATEST T/S date, not per-event history,
-so the T/S count is "sellers whose most-recent T/S is in the window", not a raw
-count of every T/S event. (Event-level counting would need a different source.)
+GM universe: the 'Validation' tab (col J) of sheet 1T-HXqHxDV2ZCWURxvjpyiYRIvaBDKYw9AolRNiJNsfs,
+excluding the labels GC / GM / Floater / Good Seller / Grand Total (and pivot junk).
+Every listed GM is emitted even with zero activity (so the report shows 0 / 0).
 
 Run: cd ~/shopdeck-metrics-site && python3 pipelines/gm_compliance_refresh.py --push
 """
-import json, os, sys, subprocess, urllib.request, datetime, re
+import json, os, sys, subprocess, urllib.request, urllib.parse, datetime, re
 from collections import defaultdict
 
 REPO = os.path.expanduser(os.environ.get("REPO_DIR", "~/shopdeck-metrics-site"))
 OUT  = os.path.join(REPO, "gm_compliance_data.json")
 CRED_CACHE = os.path.expanduser("~/metabase-arr-refresh/.mbcreds")
 DESKTOP_CFG = os.path.expanduser("~/Library/Application Support/Claude/claude_desktop_config.json")
+LOCAL_SA_KEY = os.path.expanduser("~/Downloads/metrics-tracker-automation-53ad2cdd4b65.json")
+
+VALIDATION_SHEET = "1T-HXqHxDV2ZCWURxvjpyiYRIvaBDKYw9AolRNiJNsfs"
+VALIDATION_RANGE = "'Validation'!J1:J200"
+GM_EXCLUDE = {"gc", "gm", "floater", "good seller", "grand total", "role",
+              "sum of total assigned", "counta of gc"}
 _norm = lambda v: re.sub(r"\s+", " ", str(v or "").strip())
+_key = lambda v: _norm(v).lower()
 
 
 def creds():
@@ -47,69 +53,106 @@ def req(url, method="GET", body=None, H=None):
     raise last
 
 
+def sa_info():
+    if os.environ.get("GOOGLE_SA_KEY"):
+        return json.loads(os.environ["GOOGLE_SA_KEY"])
+    if os.path.exists(LOCAL_SA_KEY):
+        return json.load(open(LOCAL_SA_KEY))
+    raise RuntimeError("no GOOGLE_SA_KEY / local SA key for the Validation sheet")
+
+
+def fetch_gm_list():
+    from google.oauth2 import service_account
+    import google.auth.transport.requests as gtr
+    c = service_account.Credentials.from_service_account_info(
+        sa_info(), scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+    c.refresh(gtr.Request())
+    u = "https://sheets.googleapis.com/v4/spreadsheets/%s/values/%s" % (VALIDATION_SHEET, urllib.parse.quote(VALIDATION_RANGE))
+    vals = json.loads(urllib.request.urlopen(
+        urllib.request.Request(u, headers={"Authorization": "Bearer " + c.token}), timeout=120).read()).get("values", [])
+    gms = []
+    for row in vals:
+        if not row:
+            continue
+        name = _norm(row[0])
+        if not name or _key(name) in GM_EXCLUDE:
+            continue
+        if re.fullmatch(r"[\d.,]+", name):        # pivot count cells
+            continue
+        if name.lower().startswith(("sum ", "counta", "*note", "note")):
+            continue
+        gms.append(name)
+    # de-dupe preserving order
+    seen, out = set(), []
+    for g in gms:
+        if _key(g) not in seen:
+            seen.add(_key(g)); out.append(g)
+    return out
+
+
 def main():
     url, email, pw = creds()
     tok = req(url + "/api/session", "POST", {"username": email, "password": pw}, {"Content-Type": "application/json"})["id"]
     H = {"Content-Type": "application/json", "X-Metabase-Session": tok}
 
-    # HIT sellers (card 11244)
-    hit = set()
-    for r in req(f"{url}/api/card/11244/query/json", "POST", {}, H):
-        if str(r.get("team_mapping") or "").strip().upper() == "HIT":
-            sid = str(r.get("seller_id") or "").strip()
-            if sid:
-                hit.add(sid)
-    print(f"[gmc] HIT sellers (card 11244): {len(hit)}")
+    gm_list = fetch_gm_list()
+    gm_by_key = {_key(g): g for g in gm_list}          # display-name lookup
+    print(f"[gmc] GM universe (Validation col J, excl Floater/Good Seller): {len(gm_list)}")
 
     # seller -> GM (card 7753)
     gm_of = {}
     for r in req(f"{url}/api/card/7753/query/json", "POST", {}, H):
         sid = str(r.get("seller_id") or "").strip()
-        if not sid:
-            continue
-        gm = _norm(r.get("growth_manager_name"))
-        gm_of[sid] = gm if gm not in ("", "-") else "Unassigned"
+        if sid:
+            gm_of[sid] = _key(r.get("growth_manager_name"))
 
-    # seller -> last T/S date (card 10189)
-    ts_of = {}
-    for r in req(f"{url}/api/card/10189/query/json", "POST", {}, H):
+    # seller -> auto/manual tag (card 9963)
+    tag_of = {}
+    for r in req(f"{url}/api/card/9963/query/json", "POST", {}, H):
         sid = str(r.get("seller_id") or "").strip()
-        d = str(r.get("last_ts_date") or "")[:10]
-        if sid and d:
-            ts_of[sid] = d
+        if sid:
+            tag_of[sid] = "auto" if str(r.get("tag") or "").strip().lower() == "auto" else "manual"
 
-    # seller -> go_live_date (card 7682, dedup preferring a golive)
-    gol_of = {}
+    # by GM buckets (only for listed GMs)
+    by_gm = {g: {"tsAuto": [], "tsManual": [], "golDates": []} for g in gm_list}
+
+    # T/S events (card 2580) -> classify + map to GM
+    ts_rows = req(f"{url}/api/card/2580/query/json", "POST", {}, H)
+    ts_kept = 0
+    for r in ts_rows:
+        sid = str(r.get("seller_id") or "").strip()
+        d = str(r.get("submitted_at") or "")[:10]
+        if not sid or not d:
+            continue
+        gk = gm_of.get(sid)
+        if gk not in gm_by_key:
+            continue
+        bucket = by_gm[gm_by_key[gk]]
+        (bucket["tsAuto"] if tag_of.get(sid) == "auto" else bucket["tsManual"]).append(d)
+        ts_kept += 1
+
+    # Golives (card 7682) -> one per seller -> map to GM
+    gol_seen = {}
     for r in req(f"{url}/api/card/7682/query/json", "POST", {}, H):
         sid = str(r.get("seller_id") or "").strip()
-        if not sid:
-            continue
         g = str(r.get("go_live_date") or "")[:10]
-        if g and (sid not in gol_of or not gol_of[sid]):
-            gol_of[sid] = g
-
-    # aggregate per GM over HIT sellers
-    by_gm = defaultdict(lambda: {"tsDates": [], "golDates": []})
-    for sid in hit:
-        gm = gm_of.get(sid, "Unassigned")
-        rec = by_gm[gm]
-        t = ts_of.get(sid)
-        if t:
-            rec["tsDates"].append(t)
-        g = gol_of.get(sid)
-        if g:
-            rec["golDates"].append(g)
+        if sid and g and (sid not in gol_seen or not gol_seen[sid]):
+            gol_seen[sid] = g
+    gol_kept = 0
+    for sid, g in gol_seen.items():
+        gk = gm_of.get(sid)
+        if gk in gm_by_key:
+            by_gm[gm_by_key[gk]]["golDates"].append(g)
+            gol_kept += 1
 
     out = {
         "generatedAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "gms": sorted(by_gm.keys()),
-        "byGM": {k: v for k, v in by_gm.items()},
+        "gms": gm_list,
+        "byGM": by_gm,
     }
     json.dump(out, open(OUT, "w"), separators=(",", ":"))
-    tot_ts = sum(len(v["tsDates"]) for v in by_gm.values())
-    tot_gol = sum(len(v["golDates"]) for v in by_gm.values())
-    print(f"[out] {OUT} ({os.path.getsize(OUT)} bytes) · {len(by_gm)} GMs · "
-          f"{tot_ts} sellers-with-T/S · {tot_gol} sellers-with-golive")
+    print(f"[out] {OUT} ({os.path.getsize(OUT)} bytes) · {len(gm_list)} GMs · "
+          f"{ts_kept} T/S events mapped · {gol_kept} golives mapped")
 
     if "--push" in sys.argv:
         subprocess.run(["git", "-C", REPO, "add", "gm_compliance_data.json"], check=True)
