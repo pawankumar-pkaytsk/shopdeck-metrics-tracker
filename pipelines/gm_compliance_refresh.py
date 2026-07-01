@@ -114,8 +114,10 @@ def main():
             tag_of[sid] = "auto" if str(r.get("tag") or "").strip().lower() == "auto" else "manual"
 
     # by GM buckets (only for listed GMs) + an 'unmapped' bucket for Floater/Good Seller/others
-    by_gm = {g: {"tsAuto": [], "tsManual": [], "golDates": []} for g in gm_list}
-    unmapped = {"tsAuto": [], "tsManual": [], "golDates": []}
+    # each bucket stores event objects so the dashboard can drill down: ts={s,n,d,t}, gol={s,n,d}
+    by_gm = {g: {"ts": [], "gol": []} for g in gm_list}
+    unmapped = {"ts": [], "gol": []}
+    name_of = {}
 
     # T/S events (card 2580) -> classify + map to GM
     ts_rows = req(f"{url}/api/card/2580/query/json", "POST", {}, H)
@@ -125,27 +127,41 @@ def main():
         d = str(r.get("submitted_at") or "")[:10]
         if not sid or not d:
             continue
+        nm = _norm(r.get("company"))
+        if nm:
+            name_of[sid] = nm
         gk = gm_of.get(sid)
         bucket = by_gm[gm_by_key[gk]] if gk in gm_by_key else unmapped
-        (bucket["tsAuto"] if tag_of.get(sid) == "auto" else bucket["tsManual"]).append(d)
+        bucket["ts"].append({"s": sid, "n": nm, "d": d, "t": "A" if tag_of.get(sid) == "auto" else "M"})
         if gk in gm_by_key:
             ts_kept += 1
 
-    # Golives (card 7682) -> one per seller -> map to GM (unmapped -> Floater/Good Seller/others)
+    # Golives -> one date per seller. Prefer local golive_data.json (already built from card
+    # 7682 by golive_refresh.py, which runs earlier in the workflow) to avoid re-scanning
+    # BigQuery; fall back to card 7682 directly if the file is absent.
     gol_seen = {}
-    for r in req(f"{url}/api/card/7682/query/json", "POST", {}, H):
-        sid = str(r.get("seller_id") or "").strip()
-        g = str(r.get("go_live_date") or "")[:10]
-        if sid and g and (sid not in gol_seen or not gol_seen[sid]):
-            gol_seen[sid] = g
+    gol_path = os.path.join(REPO, "golive_data.json")
+    if os.path.exists(gol_path):
+        for sid, s in (json.load(open(gol_path)).get("sellers", {})).items():
+            g = str((s or {}).get("g") or "")[:10]
+            if g:
+                gol_seen[str(sid).strip()] = g
+        print(f"[gmc] golives from local golive_data.json: {len(gol_seen)} sellers")
+    else:
+        for r in req(f"{url}/api/card/7682/query/json", "POST", {}, H):
+            sid = str(r.get("seller_id") or "").strip()
+            g = str(r.get("go_live_date") or "")[:10]
+            if sid and g and (sid not in gol_seen or not gol_seen[sid]):
+                gol_seen[sid] = g
     gol_kept = 0
     for sid, g in gol_seen.items():
         gk = gm_of.get(sid)
+        ev = {"s": sid, "n": name_of.get(sid, ""), "d": g}
         if gk in gm_by_key:
-            by_gm[gm_by_key[gk]]["golDates"].append(g)
+            by_gm[gm_by_key[gk]]["gol"].append(ev)
             gol_kept += 1
         else:
-            unmapped["golDates"].append(g)
+            unmapped["gol"].append(ev)
 
     out = {
         "generatedAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
