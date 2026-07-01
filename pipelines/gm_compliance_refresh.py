@@ -113,8 +113,9 @@ def main():
         if sid:
             tag_of[sid] = "auto" if str(r.get("tag") or "").strip().lower() == "auto" else "manual"
 
-    # by GM buckets (only for listed GMs)
+    # by GM buckets (only for listed GMs) + an 'unmapped' bucket for Floater/Good Seller/others
     by_gm = {g: {"tsAuto": [], "tsManual": [], "golDates": []} for g in gm_list}
+    unmapped = {"tsAuto": [], "tsManual": [], "golDates": []}
 
     # T/S events (card 2580) -> classify + map to GM
     ts_rows = req(f"{url}/api/card/2580/query/json", "POST", {}, H)
@@ -125,13 +126,12 @@ def main():
         if not sid or not d:
             continue
         gk = gm_of.get(sid)
-        if gk not in gm_by_key:
-            continue
-        bucket = by_gm[gm_by_key[gk]]
+        bucket = by_gm[gm_by_key[gk]] if gk in gm_by_key else unmapped
         (bucket["tsAuto"] if tag_of.get(sid) == "auto" else bucket["tsManual"]).append(d)
-        ts_kept += 1
+        if gk in gm_by_key:
+            ts_kept += 1
 
-    # Golives (card 7682) -> one per seller -> map to GM
+    # Golives (card 7682) -> one per seller -> map to GM (unmapped -> Floater/Good Seller/others)
     gol_seen = {}
     for r in req(f"{url}/api/card/7682/query/json", "POST", {}, H):
         sid = str(r.get("seller_id") or "").strip()
@@ -144,11 +144,14 @@ def main():
         if gk in gm_by_key:
             by_gm[gm_by_key[gk]]["golDates"].append(g)
             gol_kept += 1
+        else:
+            unmapped["golDates"].append(g)
 
     out = {
         "generatedAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "gms": gm_list,
         "byGM": by_gm,
+        "unmapped": unmapped,
     }
     json.dump(out, open(OUT, "w"), separators=(",", ":"))
     print(f"[out] {OUT} ({os.path.getsize(OUT)} bytes) · {len(gm_list)} GMs · "
