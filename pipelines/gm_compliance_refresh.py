@@ -97,14 +97,34 @@ def main():
 
     gm_list = fetch_gm_list()
     gm_by_key = {_key(g): g for g in gm_list}          # display-name lookup
+    val_tokens = [(g, _key(g).split()) for g in gm_list]
     print(f"[gmc] GM universe (Validation col J, excl Floater/Good Seller): {len(gm_list)}")
 
-    # seller -> GM (card 7753)
+    # Resolve a raw card-7753 GM name to a Validation display name.
+    # Exact normalized match, else token-wise prefix match (handles "Aakash A" -> "Aakash Aakash").
+    # Ambiguous or no match -> None (seller counts as Unmapped).
+    _rcache = {}
+    def resolve_gm(raw):
+        k = _key(raw)
+        if not k or k == "-":
+            return None
+        if k in _rcache:
+            return _rcache[k]
+        res = gm_by_key.get(k)
+        if not res:
+            nt = k.split()
+            cands = [g for g, vt in val_tokens
+                     if len(vt) == len(nt) and all(vt[i].startswith(nt[i]) or nt[i].startswith(vt[i]) for i in range(len(nt)))]
+            res = cands[0] if len(cands) == 1 else None
+        _rcache[k] = res
+        return res
+
+    # seller -> canonical GM display name (or None)
     gm_of = {}
     for r in req(f"{url}/api/card/7753/query/json", "POST", {}, H):
         sid = str(r.get("seller_id") or "").strip()
         if sid:
-            gm_of[sid] = _key(r.get("growth_manager_name"))
+            gm_of[sid] = resolve_gm(r.get("growth_manager_name"))
 
     # seller -> auto/manual tag (card 9963)
     tag_of = {}
@@ -130,10 +150,10 @@ def main():
         nm = _norm(r.get("company"))
         if nm:
             name_of[sid] = nm
-        gk = gm_of.get(sid)
-        bucket = by_gm[gm_by_key[gk]] if gk in gm_by_key else unmapped
+        canon = gm_of.get(sid)
+        bucket = by_gm[canon] if canon in by_gm else unmapped
         bucket["ts"].append({"s": sid, "n": nm, "d": d, "t": "A" if tag_of.get(sid) == "auto" else "M"})
-        if gk in gm_by_key:
+        if canon in by_gm:
             ts_kept += 1
 
     # Golives -> one date per seller. Prefer local golive_data.json (already built from card
@@ -155,10 +175,10 @@ def main():
                 gol_seen[sid] = g
     gol_kept = 0
     for sid, g in gol_seen.items():
-        gk = gm_of.get(sid)
+        canon = gm_of.get(sid)
         ev = {"s": sid, "n": name_of.get(sid, ""), "d": g}
-        if gk in gm_by_key:
-            by_gm[gm_by_key[gk]]["gol"].append(ev)
+        if canon in by_gm:
+            by_gm[canon]["gol"].append(ev)
             gol_kept += 1
         else:
             unmapped["gol"].append(ev)
