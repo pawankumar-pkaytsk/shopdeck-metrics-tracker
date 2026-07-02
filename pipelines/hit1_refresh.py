@@ -59,7 +59,24 @@ def main():
         rows.append({'id': sid, 'name': str(r.get('seller_name') or ''),
                      'hm': int(hm), 'hy': int(hy), 'g': sid in golive_ids})
 
-    out = {'generatedAt': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'), 'rows': rows}
+    # GM month-wise HIT targets (card 11322, Role='GM') -> gmTargets[hy*100+hm][gm_lower] = {t, n}
+    import re as _re
+    gm_targets = {}
+    try:
+        for r in req(f"{url}/api/card/11322/query/json", 'POST', {}, H):
+            if str(r.get('Role') or '').strip().upper() != 'GM':
+                continue
+            nm = _re.sub(r'\s+', ' ', str(r.get('Name') or '').strip())
+            hm, hy, tgt = r.get('Target_Month'), r.get('Target_Year'), r.get('HITS_Target')
+            if not nm or hm is None or hy is None or tgt is None:
+                continue
+            key = int(hy) * 100 + int(hm)
+            gm_targets.setdefault(str(key), {})[nm.lower()] = {'t': float(tgt), 'n': nm}
+        print(f"[hit1] GM targets (card 11322): {sum(len(v) for v in gm_targets.values())} entries across {len(gm_targets)} months")
+    except Exception as _e:
+        print('[hit1] GM target fetch failed:', _e)
+
+    out = {'generatedAt': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'), 'rows': rows, 'gmTargets': gm_targets}
     json.dump(out, open(OUT, 'w'), separators=(',', ':'))
     print(f"[out] {OUT} ({os.path.getsize(OUT)} bytes) · {len(rows)} HIT1 records · {sum(1 for x in rows if x['g'])} are 3-week golive")
 
