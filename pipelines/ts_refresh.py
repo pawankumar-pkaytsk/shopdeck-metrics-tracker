@@ -106,6 +106,30 @@ def main():
     except Exception as _e:
         print('[spend] full-spend merge failed (keeping 10189 only):', _e)
 
+    # --- Latest T/S date from card 2580 (event-level troubleshoots) ---
+    # Card 10189's last_ts_date can lag (or miss types), so a seller troubleshot yesterday
+    # may still read as "eligible". Merge the newest submitted_at per seller from 2580 and
+    # keep whichever last-T/S date is more recent, so eligibility reflects reality.
+    try:
+        latest = {}
+        for r in req(f"{url}/api/card/2580/query/json", 'POST', {}, H):
+            sid = str(r.get('seller_id') or '').strip()
+            d = str(r.get('submitted_at') or '')[:10]
+            if sid and d and (sid not in latest or d > latest[sid]):
+                latest[sid] = d
+        upd = 0
+        for sid, d in latest.items():
+            rec = sellers.get(sid)
+            if rec is None:
+                sellers[sid] = {'n': '', 't': None, 'd': d, 'ty': '', 'a': '', 's7': 0.0}
+                upd += 1
+            elif not rec.get('d') or d > rec['d']:
+                rec['d'] = d
+                upd += 1
+        print(f"[ts2580] latest T/S date merged for {len(latest)} sellers · {upd} dates advanced")
+    except Exception as _e:
+        print('[ts2580] merge failed (keeping 10189 dates):', _e)
+
     # HITS seller -> GL(=GC)/GM/name mapping for the 1K-5K and Good Seller teams.
     # Universe: the 1K-5K cohort per card 11020 logic = hit_master_data where (team='HITS' OR hit2=1).
     # The good_seller flag splits 1K-5K (good=0) from the Good Seller team (good=1).
