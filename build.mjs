@@ -84,10 +84,12 @@ const compile = (code) => babel.transformSync(code, { presets: [['@babel/preset-
 
 let nBabelChunks = 0, nPlain = 0, droppedBabel = false;
 
-// 1) inline JSX block -> main.js
+// 1) inline JSX block -> main.js (content-hash version query so browsers always fetch fresh JS)
 template = template.replace(/<script type="text\/babel">([\s\S]*?)<\/script>/g, (_m, code) => {
-  fs.writeFileSync(path.join(OUT, 'main.js'), compile(code));
-  return '<script src="main.js"></script>';
+  const compiled = compile(code);
+  fs.writeFileSync(path.join(OUT, 'main.js'), compiled);
+  const v = crypto.createHash('md5').update(compiled).digest('hex').slice(0, 10);
+  return '<script src="main.js?v=' + v + '"></script>';
 });
 
 // 2) external JSX chunks <script type="text/babel" src="UUID"></script> -> compiled .js
