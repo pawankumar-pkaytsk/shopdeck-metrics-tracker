@@ -531,6 +531,34 @@ def main():
     except Exception as _e:
         print(f"[bev] card 11115 failed: {_e}")
 
+    # Google week-wise RTO / S-GMV / Spend (card 11122): metric-wise rows, columns W0..W10.
+    # Split into 4 groups of 4 metrics each for grouped line charts + adjacent numbers.
+    google_wk = None
+    try:
+        g11122 = req(f"{url}/api/card/11122/query/json", 'POST', {}, H)
+        by_metric = {str(r.get('metric') or '').strip(): r for r in g11122}
+        weeks = ['W%d' % i for i in range(11)]
+        GW_MAP = [
+            ('Seller Count', [('bm_seller_count', 'Benchmark Seller Count'), ('bm_seller_count_active', 'Benchmark Active Seller Count'), ('seller_count', 'Seller Count'), ('seller_count_active', 'Active Seller Count')]),
+            ('RTO %', [('bm_rto', 'Benchmark RTO'), ('bm_rto_active', 'Benchmark Active RTO'), ('rto', 'RTO'), ('rto_active', 'Active RTO')]),
+            ('Spend / GMV', [('bm_s/gmv', 'Benchmark Spend/GMV'), ('bm_s/gmv_active', 'Benchmark Spend/GMV Active'), ('s/gmv', 'Spend/GMV'), ('s/gmv_active', 'Active Spend/GMV')]),
+            ('Spend', [('bm_spend', 'Benchmark Spend'), ('bm_spend_active', 'Benchmark Active Spend'), ('spend', 'Spend'), ('spend_active', 'Active Spend')]),
+        ]
+        def _gnum(v):
+            try: return round(float(v), 2)
+            except (TypeError, ValueError): return None
+        groups = []
+        for title, mets in GW_MAP:
+            series = []
+            for key, label in mets:
+                row = by_metric.get(key, {})
+                series.append({'label': label, 'vals': [_gnum(row.get(wk)) for wk in weeks]})
+            groups.append({'title': title, 'series': series})
+        google_wk = {'weeks': weeks, 'groups': groups}
+        print(f"[bev] google week-wise (card 11122): {len(g11122)} metrics -> {len(groups)} groups")
+    except Exception as _e:
+        print(f"[bev] card 11122 failed: {_e}")
+
     out = {
         'generatedAt': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
         'asOfDate': as_of, 'weekMon': monS, 'weekSun': sunS, 'last7Cutoff': cut7, 'last7End': today.isoformat(),
@@ -540,6 +568,7 @@ def main():
             'hit2':        {'value': len(hit2_detail), 'detail': hit2_detail},
             'cohort':      cohort,
             'weekly1k5k':  weekly_1k5k,
+            'googleWk':    google_wk,
             'churn':       churn,
             'arr_meta':    {'value': round(arr_meta), 'detail': arr_meta_detail},
             'spend_meta':  {'value': round(spend_meta), 'detail': arr_meta_detail},
