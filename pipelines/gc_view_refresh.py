@@ -33,6 +33,26 @@ DESKTOP_CFG = os.path.expanduser("~/Library/Application Support/Claude/claude_de
 LOCAL_SA_KEY = os.path.expanduser("~/Downloads/metrics-tracker-automation-53ad2cdd4b65.json")
 ESC_SHEET = "1eIbQU-odVp6lwBnawIIdSbpVHIrywy98Ib4RsZhEPgk"
 ESC_RANGE = "'Raw_Suggested'!A2:P"
+DP_SHEET = "1QCdVIkKa_4yMb1NZHSkIt50x4qoKaFlw2WXpQZnL6KM"
+DP_RANGE = "'Daily Plan'!A2:AK"
+DP_ACTIVE = {"assigned", "scheduled seller"}
+HEX24 = re.compile(r"^[0-9a-f]{24}$", re.I)
+
+
+def _sa():
+    return json.loads(os.environ["GOOGLE_SA_KEY"]) if os.environ.get("GOOGLE_SA_KEY") else (json.load(open(LOCAL_SA_KEY)) if os.path.exists(LOCAL_SA_KEY) else None)
+
+
+def _sheet(sheet_id, rng):
+    sa = _sa()
+    if not sa:
+        return []
+    from google.oauth2 import service_account
+    import google.auth.transport.requests as gtr
+    c = service_account.Credentials.from_service_account_info(sa, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+    c.refresh(gtr.Request())
+    u = "https://sheets.googleapis.com/v4/spreadsheets/%s/values/%s" % (sheet_id, urllib.parse.quote(rng))
+    return json.loads(urllib.request.urlopen(urllib.request.Request(u, headers={"Authorization": "Bearer " + c.token}), timeout=180).read()).get("values", [])
 _norm = lambda v: re.sub(r"\s+", " ", str(v or "").strip())
 FUNDS_THRESHOLD = 2000
 SPEND3K = 3540
@@ -100,23 +120,48 @@ def main():
     tok = req(url + "/api/session", "POST", {"username": email, "password": pw}, {"Content-Type": "application/json"})["id"]
     H = {"Content-Type": "application/json", "X-Metabase-Session": tok}
 
-    # ---- 7753: seller -> GC + all assigned people ----
-    people_of, gc_of = {}, {}
+    # ---- 7753: extra roles per seller (KAM/KAE/AM/POCs/GL/GM) ----
+    roles_of = {}
     for r in req(f"{url}/api/card/7753/query/json", "POST", {}, H):
         sid = str(r.get("seller_id") or "").strip()
         if not sid:
             continue
-        gc = _norm(r.get("growth_consultant_name"))
-        if gc in ("", "-") or "dummy" in gc.lower():
-            continue
-        gc_of[sid] = gc
-        people_of[sid] = {
-            "GC": gc, "GM": _norm(r.get("growth_manager_name")), "GL": _norm(r.get("growth_lead_name")),
+        roles_of[sid] = {
+            "GM": _norm(r.get("growth_manager_name")), "GL": _norm(r.get("growth_lead_name")),
             "KAM": _norm(r.get("key_account_manager_name")), "KAE": _norm(r.get("key_account_executive_name")),
             "AM": _norm(r.get("assistant_manager_name")), "Golive POC": _norm(r.get("golive_poc_name")),
             "Onboarding POC": _norm(r.get("onboarding_poc_name")), "Profitability AM": _norm(r.get("profitability_associate_manager_name")),
         }
-    print(f"[gc] 7753: {len(gc_of)} sellers under a GC")
+
+    # ---- Daily Plan sheet: authoritative GC assignment (status Assigned / Scheduled Seller) ----
+    # cols: E(4)=seller_id, F(5)=name, G(6)=status, H(7)=GC, I(8)=GM, O(14)=CL
+    gc_of, dp_meta = {}, {}
+    for r in _sheet(DP_SHEET, DP_RANGE):
+        if len(r) < 8:
+            continue
+        sid = str(r[4]).strip() if len(r) > 4 else ""
+        if not HEX24.match(sid):
+            continue
+        if _norm(r[6]).lower() not in DP_ACTIVE:
+            continue
+        gc = _norm(r[7])
+        if not gc or "dummy" in gc.lower():
+            continue
+        if sid in gc_of:
+            continue
+        gc_of[sid] = gc
+        dp_meta[sid] = {"name": _norm(r[5]) if len(r) > 5 else "", "gm": _norm(r[8]) if len(r) > 8 else "", "cl": _norm(r[14]) if len(r) > 14 else ""}
+    print(f"[gc] Daily Plan: {len(gc_of)} assigned sellers across {len(set(gc_of.values()))} GCs")
+
+    # combined people per seller
+    people_of = {}
+    for sid, gc in gc_of.items():
+        dm = dp_meta.get(sid, {}); rr = roles_of.get(sid, {})
+        people_of[sid] = {
+            "GC": gc, "GM": dm.get("gm") or rr.get("GM", ""), "CL": dm.get("cl", ""), "GL": rr.get("GL", ""),
+            "KAM": rr.get("KAM", ""), "KAE": rr.get("KAE", ""), "AM": rr.get("AM", ""),
+            "Golive POC": rr.get("Golive POC", ""), "Onboarding POC": rr.get("Onboarding POC", ""), "Profitability AM": rr.get("Profitability AM", ""),
+        }
 
     # ---- previous outputs (fallback when a BigQuery card is quota-blocked) ----
     prev = load_json("gc_data.json", {}) or {}
@@ -316,7 +361,7 @@ def main():
             hypercare = False   # eligibility criteria pending from user
             nfo = info.get(sid, {})
             sellers.append({
-                "id": sid, "name": nfo.get("name") or _norm(t.get("n")), "contact": nfo.get("contact", ""), "website": nfo.get("website", ""),
+                "id": sid, "name": nfo.get("name") or dp_meta.get(sid, {}).get("name") or _norm(t.get("n")), "contact": nfo.get("contact", ""), "website": nfo.get("website", ""),
                 "live": is_live, "notLiveYet": nl, "spending": is_spending,
                 "adBlocked": sid in ad_blocked, "fundsLow": sid in funds_low,
                 "paused": paused, "experimental": is_exp, "hypercare": hypercare,
