@@ -505,6 +505,32 @@ def main():
             cnt = sum(len(churned_tva_by_gl.get(g, [])) for g in gls if gc2gm_all.get(g) == row['name'])
             row['churn'] = cnt
 
+    # Weekly 1k-5k metrics (card 11115) for the table under ARR Cohort (1k-5k)
+    weekly_1k5k = []
+    try:
+        _w = req(f"{url}/api/card/11115/query/json", 'POST', {}, H)
+        def _wnum(v):
+            try: return round(float(v), 2)
+            except (TypeError, ValueError): return None
+        for _r in sorted(_w, key=lambda x: -(int(x.get('year_week') or 0))):
+            weekly_1k5k.append({
+                'yw': str(_r.get('year_week') or ''),
+                'total': _r.get('total'),
+                'running': _r.get('running'),
+                'notRunning': _r.get('not_running'),
+                'profitGt5': _r.get('profit_gt_5'),
+                'breakeven': _r.get('breakeven'),
+                'loss': _r.get('loss'),
+                'hitPct': _wnum(_r.get('hit_pct')),
+                'bh': _wnum(_r.get('bh')),
+                'beBh': _wnum(_r.get('be_bh')),
+                'arrBhPct': _wnum(_r.get('arr_bh_pct')),
+                'arrBeBhPct': _wnum(_r.get('arr_be_bh_pct')),
+            })
+        print(f"[bev] weekly 1k-5k (card 11115): {len(weekly_1k5k)} weeks")
+    except Exception as _e:
+        print(f"[bev] card 11115 failed: {_e}")
+
     out = {
         'generatedAt': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
         'asOfDate': as_of, 'weekMon': monS, 'weekSun': sunS, 'last7Cutoff': cut7, 'last7End': today.isoformat(),
@@ -513,6 +539,7 @@ def main():
             'accounts':    {'value': len(sids), 'detail': accounts_detail},
             'hit2':        {'value': len(hit2_detail), 'detail': hit2_detail},
             'cohort':      cohort,
+            'weekly1k5k':  weekly_1k5k,
             'churn':       churn,
             'arr_meta':    {'value': round(arr_meta), 'detail': arr_meta_detail},
             'spend_meta':  {'value': round(spend_meta), 'detail': arr_meta_detail},
