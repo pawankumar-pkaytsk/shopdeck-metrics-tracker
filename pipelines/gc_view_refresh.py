@@ -212,6 +212,17 @@ def main():
     hit1 = (load_json("hit1_data.json", {}) or {}).get("rows", [])
     bucket = (load_json("bucket_data.json", {}) or {}).get("sellers", {})
 
+    # ---- 11011 PNL W-1/-2/-3 (pnl% + spend) + best source ----
+    pnl11011 = {}
+    def _wk(p, sp):
+        return {"pnl": round(num(p), 2) if p is not None else None, "spend": round(num(sp)) if sp is not None else None}
+    def _pnl(r):
+        sid = str(r.get("seller_id") or "").strip()
+        if sid in gc_of:
+            pnl11011[sid] = {"w": [_wk(r.get("w1_pnl"), r.get("w1_spend")), _wk(r.get("w2_pnl"), r.get("w2_spend")), _wk(r.get("w3_pnl"), r.get("w3_spend"))], "src": _norm(r.get("best_source"))}
+    try_card(url, 11011, H, _pnl, "PNL 11011",
+             fallback=lambda: [pnl11011.__setitem__(sid, {"w": dd.get("pnl"), "src": dd.get("pnlSource", "")}) for sid, dd in prev_detail.items() if dd.get("pnl")])
+
     # ---- 10773 PQ (latest row per seller) ----
     pq_of, _pqdt = {}, {}
     def _pq(r):
@@ -351,7 +362,7 @@ def main():
                 "spend": {"today": round(spend_of.get(sid, {}).get("today", 0)), "yest": round(spend_of.get(sid, {}).get("yest", 0)), "life": round(spend_of.get(sid, {}).get("life", 0))},
                 "firstSpendDate": first_spend.get(sid, ""), "lastSpendDate": ls, "pauseDate": ls,
                 "adAccountType": acct_type.get(sid, ""), "remainingFunds": round(remaining.get(sid, 0)),
-                "pnl": pnl_weeks(sid), "totalTS": (t.get("t") if t.get("t") is not None else 0),
+                "pnl": (pnl11011.get(sid) or {}).get("w") or [{"pnl": None, "spend": None}, {"pnl": None, "spend": None}, {"pnl": None, "spend": None}], "pnlSource": (pnl11011.get(sid) or {}).get("src", ""), "totalTS": (t.get("t") if t.get("t") is not None else 0),
                 "icp": icp, "icpFlag": icp_flag, "pqLifetime": (pq_of.get(sid) or {}).get("life"), "pq15": (pq_of.get(sid) or {}).get("d15"),
                 "people": {k: v for k, v in (people_per(sid, gc, roles_of)).items() if v and v != "-"},
                 "lastTsDate": d, "lastTsActions": _norm(t.get("a")),
