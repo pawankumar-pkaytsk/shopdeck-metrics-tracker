@@ -162,11 +162,44 @@ def main():
     except Exception as _e:
         print(f"[golive-analysis] card 11036 failed: {_e}")
 
+    # ---- Full-universe per-GM golive aggregation (card 7682 sellers mapped to GM via card 7753) ----
+    # The Golive Overview GM level uses this so it reflects EVERY golive/backlog for a GM, not just
+    # sellers still in the live Daily Plan sheet (which drops sellers once they go live).
+    import re as _re2
+    _n2 = lambda v: _re2.sub(r'\s+', ' ', str(v or '').strip())
+    gm_of = {}
+    try:
+        for r in req(f"{url}/api/card/7753/query/json", 'POST', {}, H):
+            sid = str(r.get('seller_id') or '').strip()
+            if not sid:
+                continue
+            g = _n2(r.get('growth_manager_name'))
+            gm_of[sid] = g if g not in ('', '-') else 'Unassigned'
+        print(f"[golive-gm] card 7753 GM map: {len(gm_of)} sellers")
+    except Exception as _e:
+        print(f"[golive-gm] card 7753 failed: {_e}")
+
+    gm_golive = {}
+    for sid, s in sellers.items():
+        gm = gm_of.get(sid)
+        if not gm or gm == 'Unassigned':
+            continue  # skip sellers with no real GM (keeps the GM view clean)
+        a2h, gol = s.get('a') or '', s.get('g') or ''
+        rec = gm_golive.setdefault(gm, {'c0': [], 'c1': [], 'c2': [], 'c3': [], 'mtd': []})
+        if a2h and not gol:
+            c = cohort_of(a2h)
+            idx = {'M0': 0, 'M1': 1, 'M2': 2, 'M3': 3}.get(c)
+            if idx is not None:
+                rec['c%d' % idx].append({'id': sid, 'name': '', 'gc': '', 'gm': gm, 'a2h': a2h, 'golive': gol})
+        if gol and gol[:7] == cur_month:
+            rec['mtd'].append({'id': sid, 'name': '', 'gc': '', 'gm': gm, 'a2h': a2h, 'golive': gol})
+
     out = {
         'generatedAt': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
         'summary': summary,
         'sellers': sellers,
         'pendingAnalysis': pending_analysis,
+        'gmGolive': gm_golive,
     }
     json.dump(out, open(OUT, 'w'), separators=(',', ':'))
     print(f"[out] {OUT} ({os.path.getsize(OUT)} bytes) · {len(sellers)} sellers")
