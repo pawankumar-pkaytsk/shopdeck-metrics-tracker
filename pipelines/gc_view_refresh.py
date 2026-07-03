@@ -118,13 +118,26 @@ def main():
         }
     print(f"[gc] 7753: {len(gc_of)} sellers under a GC")
 
-    # ---- 10352: company / website / contact ----
+    # ---- previous outputs (fallback when a BigQuery card is quota-blocked) ----
+    prev = load_json("gc_data.json", {}) or {}
+    prev_detail = (load_json("gc_detail_data.json", {}) or {}).get("detail", {})
+    prev_sellers = {}
+    for _g, _v in (prev.get("byGC") or {}).items():
+        for _s in _v.get("sellers", []):
+            prev_sellers[_s["id"]] = _s
+
+    # ---- 10352: company / website / contact (fallback: previous file) ----
     info = {}
-    for r in req(f"{url}/api/card/10352/query/json", "POST", {}, H):
-        sid = str(r.get("seller_id") or "").strip()
-        if sid in gc_of:
-            info[sid] = {"name": _norm(r.get("company")), "website": _norm(r.get("website")), "contact": _norm(r.get("seller_contact"))}
-    print(f"[gc] 10352: info for {len(info)} sellers")
+    try:
+        for r in req(f"{url}/api/card/10352/query/json", "POST", {}, H):
+            sid = str(r.get("seller_id") or "").strip()
+            if sid in gc_of:
+                info[sid] = {"name": _norm(r.get("company")), "website": _norm(r.get("website")), "contact": _norm(r.get("seller_contact"))}
+        print(f"[gc] 10352: info for {len(info)} sellers")
+    except Exception as _e:
+        for sid, s in prev_sellers.items():
+            info[sid] = {"name": s.get("name", ""), "website": s.get("website", ""), "contact": s.get("contact", "")}
+        print(f"[gc] 10352 failed (quota?) -> reused {len(info)} from previous file: {_e}")
 
     # ---- local data ----
     golive = (load_json("golive_data.json", {}) or {}).get("sellers", {})
@@ -141,24 +154,49 @@ def main():
         cur = spend_of.setdefault(sid, {"today": 0.0, "yest": 0.0, "life": 0.0})
         cur["today"] += num(r.get("today_spend")); cur["yest"] += num(r.get("yesterday_spend")); cur["life"] += num(r.get("lifetime_spend"))
 
-    # ---- 3539 funds-low, 11286 ad-blocked ----
+    # ---- 8684 experimental sellers (any seller present is experimental) ----
+    experimental = set()
+    try:
+        for r in req(f"{url}/api/card/8684/query/json", "POST", {}, H):
+            sid = str(r.get("seller_id") or (list(r.values())[0] if r else "") or "").strip()
+            if sid in gc_of:
+                experimental.add(sid)
+        print(f"[gc] 8684: {len(experimental)} experimental sellers")
+    except Exception as _e:
+        experimental = {sid for sid, s in prev_sellers.items() if s.get("experimental")}
+        print(f"[gc] 8684 failed (quota?) -> reused {len(experimental)} from previous file")
+
+    # ---- 3539 funds-low, 11286 ad-blocked (fallback: previous file) ----
     funds_low, ad_blocked = set(), set()
-    for r in req(f"{url}/api/card/3539/query/json", "POST", {}, H):
-        sid = str(r.get("seller_id") or "").strip()
-        if sid in gc_of and bool(r.get("is_prepay_account")) and num(r.get("balance")) < FUNDS_THRESHOLD:
-            funds_low.add(sid)
-    for r in req(f"{url}/api/card/11286/query/json", "POST", {}, H):
-        sid = str(r.get("seller_id") or "").strip()
-        if sid in gc_of:
-            ad_blocked.add(sid)
+    try:
+        for r in req(f"{url}/api/card/3539/query/json", "POST", {}, H):
+            sid = str(r.get("seller_id") or "").strip()
+            if sid in gc_of and bool(r.get("is_prepay_account")) and num(r.get("balance")) < FUNDS_THRESHOLD:
+                funds_low.add(sid)
+    except Exception:
+        funds_low = {sid for sid, s in prev_sellers.items() if s.get("fundsLow")}
+        print(f"[gc] 3539 failed -> reused {len(funds_low)} funds-low from previous file")
+    try:
+        for r in req(f"{url}/api/card/11286/query/json", "POST", {}, H):
+            sid = str(r.get("seller_id") or "").strip()
+            if sid in gc_of:
+                ad_blocked.add(sid)
+    except Exception:
+        ad_blocked = {sid for sid, s in prev_sellers.items() if s.get("adBlocked")}
+        print(f"[gc] 11286 failed -> reused {len(ad_blocked)} ad-blocked from previous file")
     print(f"[gc] funds-low={len(funds_low)} ad-blocked={len(ad_blocked)}")
 
-    # ---- 10206 total calls per seller ----
+    # ---- 10206 total calls per seller (fallback: previous detail) ----
     calls_total = defaultdict(int)
-    for r in req(f"{url}/api/card/10206/query/json", "POST", {}, H):
-        sid = str(r.get("seller_id") or "").strip()
-        if sid in gc_of:
-            calls_total[sid] += 1
+    try:
+        for r in req(f"{url}/api/card/10206/query/json", "POST", {}, H):
+            sid = str(r.get("seller_id") or "").strip()
+            if sid in gc_of:
+                calls_total[sid] += 1
+    except Exception:
+        for sid, dd in prev_detail.items():
+            calls_total[sid] = dd.get("totalCalls", 0)
+        print("[gc] 10206 failed -> reused calls from previous detail")
 
     # ---- task_data: per-seller pending/done tasks & scheduled calls ----
     tasks = (load_json("task_data.json", {}) or {}).get("tasks", [])
@@ -227,18 +265,23 @@ def main():
             if is_spending: spending += 1
             if over3k: spend3k += 1
             if elig: pending_ts.append(sid)
+            sp = spend_of.get(sid, {"today": 0.0, "yest": 0.0, "life": 0.0})
+            paused = (sp["today"] == 0 and sp["yest"] == 0 and sp["life"] > 0)
+            is_exp = sid in experimental
+            hypercare = False   # eligibility criteria pending from user
             nfo = info.get(sid, {})
             sellers.append({
                 "id": sid, "name": nfo.get("name") or _norm(t.get("n")), "contact": nfo.get("contact", ""), "website": nfo.get("website", ""),
                 "live": is_live, "notLiveYet": nl, "spending": is_spending,
                 "adBlocked": sid in ad_blocked, "fundsLow": sid in funds_low,
+                "paused": paused, "experimental": is_exp, "hypercare": hypercare,
             })
-            sp = spend_of.get(sid, {"today": 0.0, "yest": 0.0, "life": 0.0})
             cases = []
             if nl: cases.append("Golive pending")
             if sid in ad_blocked: cases.append("Ad account blocked")
             if sid in funds_low: cases.append("Funds addition (low balance)")
             if elig: cases.append("Troubleshoot due")
+            if paused: cases.append("Account paused (no spend today/yesterday)")
             detail[sid] = {
                 "spend": {"today": round(sp["today"]), "yest": round(sp["yest"]), "life": round(sp["life"])},
                 "people": {k: v for k, v in (people_of.get(sid) or {}).items() if v and v != "-"},
@@ -248,7 +291,8 @@ def main():
                 "callsPending": c_pending.get(sid, []), "callsDone": c_done.get(sid, []),
                 "adBlocked": sid in ad_blocked, "fundsLow": sid in funds_low,
                 "live": is_live, "notLiveYet": nl, "spending": is_spending,
-                "paused": None, "experimental": None, "pqLifetime": None, "pq15": None,
+                "paused": paused, "experimental": is_exp, "hypercare": hypercare,
+                "pqLifetime": None, "pq15": None,
                 "cases": cases,
             }
         assigned = len(sids)
@@ -265,6 +309,7 @@ def main():
             "golive": [s["id"] for s in sellers if s["notLiveYet"]],
             "funds": [s["id"] for s in sellers if s["fundsLow"]],
             "adBlocked": [s["id"] for s in sellers if s["adBlocked"]],
+            "hypercare": [s["id"] for s in sellers if s.get("hypercare")],
             "pendingTS": pending_ts,
             "pendingTasks": [x for sid in sids for x in t_pending.get(sid, [])],
             "callbacks": [x for sid in sids for x in c_pending.get(sid, [])],
