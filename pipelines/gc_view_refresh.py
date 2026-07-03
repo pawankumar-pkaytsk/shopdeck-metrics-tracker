@@ -139,6 +139,21 @@ def main():
             info[sid] = {"name": s.get("name", ""), "website": s.get("website", ""), "contact": s.get("contact", "")}
         print(f"[gc] 10352 failed (quota?) -> reused {len(info)} from previous file: {_e}")
 
+    # ---- 10065: last spend date (paused flag + pause date; fallback: previous detail) ----
+    last_spend = {}
+    try:
+        for r in req(f"{url}/api/card/10065/query/json", "POST", {}, H):
+            sid = str(r.get("seller id") or r.get("seller_id") or "").strip()
+            d = str(r.get("last spend date") or "")[:10]
+            if sid in gc_of and d:
+                last_spend[sid] = d
+        print(f"[gc] 10065: last-spend-date for {len(last_spend)} sellers")
+    except Exception:
+        for sid, dd in prev_detail.items():
+            if dd.get("pauseDate"):
+                last_spend[sid] = dd["pauseDate"]
+        print(f"[gc] 10065 failed -> reused {len(last_spend)} pause dates from previous detail")
+
     # ---- local data ----
     golive = (load_json("golive_data.json", {}) or {}).get("sellers", {})
     ts_sellers = (load_json("ts_data.json", {}) or {}).get("sellers", {})
@@ -186,16 +201,24 @@ def main():
         print(f"[gc] 11286 failed -> reused {len(ad_blocked)} ad-blocked from previous file")
     print(f"[gc] funds-low={len(funds_low)} ad-blocked={len(ad_blocked)}")
 
-    # ---- 10206 total calls per seller (fallback: previous detail) ----
+    # ---- 10206 total calls + calls after pause date (fallback: previous detail) ----
     calls_total = defaultdict(int)
+    calls_after = defaultdict(int)
     try:
         for r in req(f"{url}/api/card/10206/query/json", "POST", {}, H):
             sid = str(r.get("seller_id") or "").strip()
-            if sid in gc_of:
-                calls_total[sid] += 1
+            if sid not in gc_of:
+                continue
+            calls_total[sid] += 1
+            cd = str(r.get("call_date") or "")[:10]
+            ls = last_spend.get(sid)
+            if cd and ls and cd > ls:
+                calls_after[sid] += 1
     except Exception:
         for sid, dd in prev_detail.items():
             calls_total[sid] = dd.get("totalCalls", 0)
+            if dd.get("callsAfterPaused") is not None:
+                calls_after[sid] = dd["callsAfterPaused"]
         print("[gc] 10206 failed -> reused calls from previous detail")
 
     # ---- task_data: per-seller pending/done tasks & scheduled calls ----
@@ -219,6 +242,7 @@ def main():
 
     # ---- HIT targets (GC, current month) + achieved ----
     today = datetime.date.today()
+    yday_iso = (today - datetime.timedelta(days=1)).isoformat()
     cur_m, cur_y = today.month, today.year
     hits_target = {}
     for r in req(f"{url}/api/card/11322/query/json", "POST", {}, H):
@@ -266,7 +290,8 @@ def main():
             if over3k: spend3k += 1
             if elig: pending_ts.append(sid)
             sp = spend_of.get(sid, {"today": 0.0, "yest": 0.0, "life": 0.0})
-            paused = (sp["today"] == 0 and sp["yest"] == 0 and sp["life"] > 0)
+            pause_date = last_spend.get(sid, "")
+            paused = bool(pause_date and pause_date < yday_iso)
             is_exp = sid in experimental
             hypercare = False   # eligibility criteria pending from user
             nfo = info.get(sid, {})
@@ -286,7 +311,7 @@ def main():
                 "spend": {"today": round(sp["today"]), "yest": round(sp["yest"]), "life": round(sp["life"])},
                 "people": {k: v for k, v in (people_of.get(sid) or {}).items() if v and v != "-"},
                 "lastTsDate": d, "lastTsActions": _norm(t.get("a")),
-                "totalCalls": calls_total.get(sid, 0), "callsAfterPaused": None,
+                "totalCalls": calls_total.get(sid, 0), "callsAfterPaused": calls_after.get(sid, 0), "pauseDate": pause_date,
                 "tasksPending": t_pending.get(sid, []), "tasksDone": t_done.get(sid, []),
                 "callsPending": c_pending.get(sid, []), "callsDone": c_done.get(sid, []),
                 "adBlocked": sid in ad_blocked, "fundsLow": sid in funds_low,
