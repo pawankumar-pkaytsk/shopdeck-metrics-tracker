@@ -154,6 +154,26 @@ def main():
                 last_spend[sid] = dd["pauseDate"]
         print(f"[gc] 10065 failed -> reused {len(last_spend)} pause dates from previous detail")
 
+    # ---- 10773: PQ lifetime + last-15-day (latest row per seller; fallback: prev detail) ----
+    pq_of = {}
+    try:
+        latest_dt = {}
+        for r in req(f"{url}/api/card/10773/query/json", "POST", {}, H):
+            sid = str(r.get("seller_id") or "").strip()
+            if sid not in gc_of:
+                continue
+            d = str(r.get("date") or "")[:10]
+            if sid not in latest_dt or d > latest_dt[sid]:
+                latest_dt[sid] = d
+                lv, dv = r.get("lifetime_avg_pq"), r.get("last_15d_avg_pd")
+                pq_of[sid] = {"life": round(num(lv), 2) if lv is not None else None, "d15": round(num(dv), 2) if dv is not None else None}
+        print(f"[gc] 10773: PQ for {len(pq_of)} sellers")
+    except Exception:
+        for sid, dd in prev_detail.items():
+            if dd.get("pqLifetime") is not None or dd.get("pq15") is not None:
+                pq_of[sid] = {"life": dd.get("pqLifetime"), "d15": dd.get("pq15")}
+        print("[gc] 10773 failed -> reused PQ from previous detail")
+
     # ---- local data ----
     golive = (load_json("golive_data.json", {}) or {}).get("sellers", {})
     ts_sellers = (load_json("ts_data.json", {}) or {}).get("sellers", {})
@@ -317,7 +337,7 @@ def main():
                 "adBlocked": sid in ad_blocked, "fundsLow": sid in funds_low,
                 "live": is_live, "notLiveYet": nl, "spending": is_spending,
                 "paused": paused, "experimental": is_exp, "hypercare": hypercare,
-                "pqLifetime": None, "pq15": None,
+                "pqLifetime": (pq_of.get(sid) or {}).get("life"), "pq15": (pq_of.get(sid) or {}).get("d15"),
                 "cases": cases,
             }
         assigned = len(sids)
