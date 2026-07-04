@@ -183,11 +183,72 @@ def main():
         else:
             unmapped["gol"].append(ev)
 
+    # ---- Troubleshoot eligibility per GM per ISO week (card 10773: weekly seller spend > 3540) ----
+    # Denominator for TS Compliance % = sellers under the GM whose summed spend in that ISO week > 3540.
+    elig = {g: {} for g in gm_list}
+    elig_weeks = set()
+    try:
+        wkspend = {}
+        for r in req(f"{url}/api/card/10773/query/json", "POST", {}, H):
+            sid = str(r.get("seller_id") or "").strip()
+            d = str(r.get("date") or "")[:10]
+            if not sid or not d:
+                continue
+            iso = datetime.date.fromisoformat(d).isocalendar()
+            yw = iso[0] * 100 + iso[1]
+            wkspend[(yw, sid)] = wkspend.get((yw, sid), 0.0) + float(r.get("spend") or 0)
+        for (yw, sid), v in wkspend.items():
+            if v > 3540:
+                g = gm_of.get(sid)
+                if g in elig:
+                    elig[g][str(yw)] = elig[g].get(str(yw), 0) + 1
+                    elig_weeks.add(yw)
+        print(f"[gmc] 10773 eligibility: weeks={sorted(elig_weeks)} · mapped eligible seller-weeks={sum(sum(w.values()) for w in elig.values())}")
+    except Exception as _e:
+        try:
+            prev_g = json.load(open(OUT))
+        except Exception:
+            prev_g = {}
+        elig = prev_g.get("tsElig", elig)
+        elig_weeks = {int(w) for v in elig.values() for w in v}
+        print(f"[gmc] 10773 failed -> reused previous tsElig: {_e}")
+
+    # ---- Troubleshoot Task Compliance (task_data.json: ty=troubleshoot_action per GM per created-week) ----
+    # total tasks created, done (completed/closed), pending, done-within-SLA (tat <= sla).
+    task_comp = {g: {} for g in gm_list}
+    tk_path = os.path.join(REPO, "task_data.json")
+    if os.path.exists(tk_path):
+        n_mapped = 0
+        for t in (json.load(open(tk_path)).get("tasks", [])):
+            if str(t.get("ty") or "") != "troubleshoot_action":
+                continue
+            sid = str(t.get("s") or "").strip()
+            g = gm_of.get(sid)
+            yw = str(t.get("yw") or "")
+            if g not in task_comp or not yw:
+                continue
+            rec = task_comp[g].setdefault(yw, {"t": 0, "d": 0, "p": 0, "s": 0})
+            rec["t"] += 1
+            st = str(t.get("status") or "").lower()
+            if st in ("completed", "closed"):
+                rec["d"] += 1
+                if t.get("tat") is not None and t.get("sla") is not None and t["tat"] <= t["sla"]:
+                    rec["s"] += 1
+            elif st == "pending":
+                rec["p"] += 1
+            n_mapped += 1
+        print(f"[gmc] task compliance: {n_mapped} troubleshoot tasks mapped to Validation GMs")
+    else:
+        print("[gmc] task_data.json missing -> taskComp empty")
+
     out = {
         "generatedAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "gms": gm_list,
         "byGM": by_gm,
         "unmapped": unmapped,
+        "tsElig": elig,
+        "eligWeeks": sorted((str(w) for w in elig_weeks), reverse=True),
+        "taskComp": task_comp,
     }
     json.dump(out, open(OUT, "w"), separators=(",", ":"))
     print(f"[out] {OUT} ({os.path.getsize(OUT)} bytes) · {len(gm_list)} GMs · "
