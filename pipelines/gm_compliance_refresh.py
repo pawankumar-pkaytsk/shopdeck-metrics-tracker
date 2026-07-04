@@ -201,9 +201,9 @@ def main():
             if v > 3540:
                 g = gm_of.get(sid)
                 if g in elig:
-                    elig[g][str(yw)] = elig[g].get(str(yw), 0) + 1
+                    elig[g].setdefault(str(yw), []).append(sid)
                     elig_weeks.add(yw)
-        print(f"[gmc] 10773 eligibility: weeks={sorted(elig_weeks)} · mapped eligible seller-weeks={sum(sum(w.values()) for w in elig.values())}")
+        print(f"[gmc] 10773 eligibility: weeks={sorted(elig_weeks)} · mapped eligible seller-weeks={sum(len(w) for v in elig.values() for w in v.values())}")
     except Exception as _e:
         try:
             prev_g = json.load(open(OUT))
@@ -227,15 +227,18 @@ def main():
             yw = str(t.get("yw") or "")
             if g not in task_comp or not yw:
                 continue
-            rec = task_comp[g].setdefault(yw, {"t": 0, "d": 0, "p": 0, "s": 0})
+            rec = task_comp[g].setdefault(yw, {"t": 0, "d": 0, "p": 0, "s": 0, "rows": []})
             rec["t"] += 1
             st = str(t.get("status") or "").lower()
+            sla_ok = 0
             if st in ("completed", "closed"):
                 rec["d"] += 1
                 if t.get("tat") is not None and t.get("sla") is not None and t["tat"] <= t["sla"]:
                     rec["s"] += 1
+                    sla_ok = 1
             elif st == "pending":
                 rec["p"] += 1
+            rec["rows"].append([sid, str(t.get("st") or ""), st, sla_ok, str(t.get("du") or "")])
             n_mapped += 1
         print(f"[gmc] task compliance: {n_mapped} troubleshoot tasks mapped to Validation GMs")
     else:
@@ -247,6 +250,7 @@ def main():
         "byGM": by_gm,
         "unmapped": unmapped,
         "tsElig": elig,
+        "sellerNames": name_of,
         "eligWeeks": sorted((str(w) for w in elig_weeks), reverse=True),
         "taskComp": task_comp,
     }
