@@ -186,10 +186,13 @@ def main():
     # ---- Troubleshoot eligibility per GM per ISO week (card 10773: weekly seller spend > 3540) ----
     # Denominator for TS Compliance % = sellers under the GM whose summed spend in that ISO week > 3540.
     elig = {g: {} for g in gm_list}
+    elig_roll = {g: [] for g in gm_list}
+    rolling = None
     elig_weeks = set()
     try:
         wkspend = {}
-        for r in req(f"{url}/api/card/10773/query/json", "POST", {}, H):
+        _rows_10773 = req(f"{url}/api/card/10773/query/json", "POST", {}, H)
+        for r in _rows_10773:
             sid = str(r.get("seller_id") or "").strip()
             d = str(r.get("date") or "")[:10]
             if not sid or not d:
@@ -203,7 +206,22 @@ def main():
                 if g in elig:
                     elig[g].setdefault(str(yw), []).append(sid)
                     elig_weeks.add(yw)
-        print(f"[gmc] 10773 eligibility: weeks={sorted(elig_weeks)} · mapped eligible seller-weeks={sum(len(w) for v in elig.values() for w in v.values())}")
+        # rolling last-7-days window (running-week eligibility): today-6 .. today
+        _today = datetime.date.today()
+        _rs, _re = (_today - datetime.timedelta(days=6)).isoformat(), _today.isoformat()
+        roll_spend = {}
+        for r in _rows_10773:
+            sid = str(r.get("seller_id") or "").strip()
+            d = str(r.get("date") or "")[:10]
+            if sid and _rs <= d <= _re:
+                roll_spend[sid] = roll_spend.get(sid, 0.0) + float(r.get("spend") or 0)
+        for sid, v in roll_spend.items():
+            if v > 3540:
+                g = gm_of.get(sid)
+                if g in elig_roll:
+                    elig_roll[g].append(sid)
+        rolling = {"start": _rs, "end": _re}
+        print(f"[gmc] 10773 eligibility: weeks={sorted(elig_weeks)} · rolling {_rs}..{_re} eligible={sum(len(v) for v in elig_roll.values())}")
     except Exception as _e:
         try:
             prev_g = json.load(open(OUT))
@@ -250,6 +268,8 @@ def main():
         "byGM": by_gm,
         "unmapped": unmapped,
         "tsElig": elig,
+        "tsEligRolling": elig_roll,
+        "rolling": rolling,
         "sellerNames": name_of,
         "eligWeeks": sorted((str(w) for w in elig_weeks), reverse=True),
         "taskComp": task_comp,
