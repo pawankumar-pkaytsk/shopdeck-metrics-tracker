@@ -26,6 +26,7 @@ DP_SHEET = "1QCdVIkKa_4yMb1NZHSkIt50x4qoKaFlw2WXpQZnL6KM"
 DP_RANGE = "'Daily Plan'!A2:AK"
 DP_ACTIVE = {"assigned", "scheduled seller"}
 HEX24 = re.compile(r"^[0-9a-f]{24}$", re.I)
+LIGHT = "--light" in sys.argv   # refresh only GC assignment (7753) + sheets; reuse heavy card data
 FUNDS_THRESHOLD = 2000
 SPEND3K = 3540
 _norm = lambda v: re.sub(r"\s+", " ", str(v or "").strip())
@@ -82,7 +83,13 @@ def _sheet(sheet_id, rng):
 
 
 def try_card(url, cid, H, on_row, label, fallback=None):
-    """Fetch a card; call on_row(r) per row. On failure run fallback()."""
+    """Fetch a card; call on_row(r) per row. On failure run fallback().
+    In --light mode, heavy cards are skipped and their fallback (previous data) is used."""
+    if LIGHT and cid not in (11322,):
+        print(f"[gc] card {cid} skipped (light mode) -> fallback ({label})")
+        if fallback:
+            fallback()
+        return
     try:
         for r in req(f"{url}/api/card/{cid}/query/json", "POST", {}, H):
             on_row(r)
@@ -203,7 +210,12 @@ def main():
         # prefer an unresolved ticket; else keep latest
         if cur is None or (not resolved and cur.get("resolved")):
             ab_ticket[sid] = {"resolved": resolved, "created": str(r.get("task_created_at") or "")[:10], "resolutionDate": str(r.get("completion_date") or "")[:10]}
-    try_card(url, 11036, H, _tkt, "ad-block tickets")
+    def _tkt_fb():
+        for sid, dd in prev_detail.items():
+            ab = dd.get("adBlock")
+            if ab and ab.get("ticketRaised"):
+                ab_ticket[sid] = {"resolved": bool(ab.get("resolved")), "created": "", "resolutionDate": ab.get("resolutionDate", "")}
+    try_card(url, 11036, H, _tkt, "ad-block tickets", fallback=_tkt_fb)
 
     # ---- local data ----
     golive = (load_json("golive_data.json", {}) or {}).get("sellers", {})
@@ -245,7 +257,8 @@ def main():
             return
         cur = spend_of.setdefault(sid, {"today": 0.0, "yest": 0.0, "life": 0.0})
         cur["today"] += num(r.get("today_spend")); cur["yest"] += num(r.get("yesterday_spend")); cur["life"] += num(r.get("lifetime_spend"))
-    try_card(url, 2787, H, _spend, "spend")
+    try_card(url, 2787, H, _spend, "spend",
+             fallback=lambda: [spend_of.__setitem__(sid, dict(dd.get("spend") or {"today": 0.0, "yest": 0.0, "life": 0.0})) for sid, dd in prev_detail.items()])
 
     # ---- 10206 calls + calls after pause ----
     calls_total, calls_after = defaultdict(int), defaultdict(int)

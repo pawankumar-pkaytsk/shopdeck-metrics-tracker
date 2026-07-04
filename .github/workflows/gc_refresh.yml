@@ -1,0 +1,63 @@
+name: GC assignment refresh (light)
+
+# Frequent lightweight sync of the Growth Consultant view:
+# re-pulls only the seller->GC assignment (card 7753) + sheets and regroups,
+# reusing the previous heavy card data (which the nightly full refresh rebuilds).
+# Keeps GC books near-real-time (e.g. leave/return redistributions) without
+# burning BigQuery quota.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '30 3-15/2 * * *'   # every 2h, 09:00-21:00 IST
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gc-light-refresh
+  cancel-in-progress: false
+
+jobs:
+  gc-light:
+    runs-on: ubuntu-latest
+    env:
+      METABASE_URL: ${{ secrets.METABASE_URL }}
+      METABASE_USER_EMAIL: ${{ secrets.METABASE_USER_EMAIL }}
+      METABASE_PASSWORD: ${{ secrets.METABASE_PASSWORD }}
+      REPO_DIR: ${{ github.workspace }}
+      GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install google-auth requests
+
+      - name: GC View (light — assignment only)
+        run: python pipelines/gc_view_refresh.py --light
+
+      - name: Commit & push refreshed data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add gc_data.json gc_detail_data.json
+          if git diff --cached --quiet; then
+            echo "No data changes."
+          else
+            git commit -m "GC assignment light refresh"
+            git pull --rebase -X ours origin main
+            git push origin HEAD:main
+          fi
+
+      - name: Deploy frontend to Vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: team_Nv7Bqm9rCMXGjFA018pplRCW
+          VERCEL_PROJECT_ID: prj_YddUtFJTQvft3JUAArpDh9wsNr8l
+        run: npx --yes vercel@latest --prod --yes --token "$VERCEL_TOKEN"
