@@ -22,6 +22,9 @@ REPO = os.path.expanduser(os.environ.get("REPO_DIR", "~/shopdeck-metrics-site"))
 OUT = os.path.join(REPO, "lt_data.json")
 CRED_CACHE = os.path.expanduser("~/metabase-arr-refresh/.mbcreds")
 DESKTOP_CFG = os.path.expanduser("~/Library/Application Support/Claude/claude_desktop_config.json")
+LOCAL_SA_KEY = os.path.expanduser("~/Downloads/metrics-tracker-automation-53ad2cdd4b65.json")
+STRIKE_SHEET = "1kbLjeYEJWvacK6imqjHTM-alp6eGM9cb9AbV1paNXUM"
+STRIKE_RANGE = "'Strikes'!A2:I"
 NEW_SINCE = datetime.date(2026, 1, 1)
 _norm = lambda v: re.sub(r"\s+", " ", str(v or "").strip())
 _key = lambda v: _norm(v).lower()
@@ -57,6 +60,34 @@ def load_json(name, dflt):
 def num(v):
     try: return float(v)
     except (TypeError, ValueError): return 0.0
+
+
+def _sa():
+    if os.environ.get("GOOGLE_SA_KEY"):
+        return json.loads(os.environ["GOOGLE_SA_KEY"])
+    return json.load(open(LOCAL_SA_KEY)) if os.path.exists(LOCAL_SA_KEY) else None
+
+
+def _sheet(sheet_id, rng):
+    sa = _sa()
+    if not sa:
+        return []
+    from google.oauth2 import service_account
+    import google.auth.transport.requests as gtr
+    import urllib.parse
+    c = service_account.Credentials.from_service_account_info(sa, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+    c.refresh(gtr.Request())
+    u = "https://sheets.googleapis.com/v4/spreadsheets/%s/values/%s" % (sheet_id, urllib.parse.quote(rng))
+    return json.loads(urllib.request.urlopen(urllib.request.Request(u, headers={"Authorization": "Bearer " + c.token}), timeout=180).read()).get("values", [])
+
+
+def parse_strike_date(s):
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%b-%y"):
+        try:
+            return datetime.datetime.strptime(str(s).strip(), fmt).date()
+        except (ValueError, TypeError):
+            continue
+    return None
 
 
 def parse_doj(s):
@@ -121,6 +152,34 @@ def main():
     for t in tasks:
         t_by_gc[_key(t.get("gc"))].append(t)
 
+    # ---- Strikes (Google Sheet) grouped by strike-recipient name + month ----
+    strk_by_gc = defaultdict(lambda: defaultdict(list))  # gc_key -> 'YYYY-MM' -> [rows]
+    strk_rows = 0
+    for r in _sheet(STRIKE_SHEET, STRIKE_RANGE):
+        who = _key(r[2]) if len(r) > 2 else ""
+        if not who:
+            continue
+        d = parse_strike_date(r[1]) if len(r) > 1 else None
+        mo = d.strftime("%Y-%m") if d else None
+        if not mo:  # fall back to Strike Month/Year text columns
+            mon_txt, yr_txt = (_norm(r[7]) if len(r) > 7 else ""), (_norm(r[8]) if len(r) > 8 else "")
+            try:
+                mo = datetime.datetime.strptime(mon_txt[:3], "%b").strftime("%m") if mon_txt else None
+                mo = f"{int(yr_txt)}-{mo}" if (mo and yr_txt) else None
+            except (ValueError, TypeError):
+                mo = None
+        if not mo:
+            continue
+        strk_by_gc[who][mo].append({
+            "date": d.isoformat() if d else _norm(r[1]) if len(r) > 1 else "",
+            "type": _norm(r[4]) if len(r) > 4 else "",
+            "issue": _norm(r[5]) if len(r) > 5 else "",
+            "detail": _norm(r[6]) if len(r) > 6 else "",
+            "by": _norm(r[3]) if len(r) > 3 else "",
+        })
+        strk_rows += 1
+    print(f"[lt] strikes sheet: {strk_rows} strike rows across {len(strk_by_gc)} people")
+
     months = sorted({f"2026-{str(m).zfill(2)}" for m in range(1, today.month + 1)}, reverse=True)
 
     out_gcs = []
@@ -172,6 +231,13 @@ def main():
                     "task": agg(reg) if in_window else None,     # None => data awaiting (outside 45d window)
                     "callback": agg(cbs) if in_window else None,
                 }
+        # strikes: keyed on GC name, available even without a seller book
+        for mo in months:
+            srows = strk_by_gc.get(k, {}).get(mo, [])
+            by_month.setdefault(mo, {"golive": 0, "hitsTarget": None, "hitsAch": 0, "task": None, "callback": None})
+            by_month[mo]["strikes"] = len(srows)
+            by_month[mo]["strikeRows"] = srows
+        rec["strikesTotal"] = sum(len(v) for v in strk_by_gc.get(k, {}).values())
         rec["cur"] = cur
         rec["byMonth"] = by_month
         out_gcs.append(rec)
