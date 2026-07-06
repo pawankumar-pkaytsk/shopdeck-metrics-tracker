@@ -21,13 +21,15 @@ def read_sheet_sa(sid, rng):
     """Read a Google Sheet range via the service account (GOOGLE_SA_KEY env or local key file)."""
     from google.oauth2 import service_account
     import google.auth.transport.requests as gtr
+    SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     if os.environ.get('GOOGLE_SA_KEY'):
         cred = service_account.Credentials.from_service_account_info(
-            json.loads(os.environ['GOOGLE_SA_KEY']), scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+            json.loads(os.environ['GOOGLE_SA_KEY']), scopes=SCOPES)
     else:
-        path = glob.glob(os.path.expanduser('~/Downloads/metrics-tracker-automation-*.json'))
-        cred = service_account.Credentials.from_service_account_file(
-            path[0], scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+        # exact known path first (glob of ~/Downloads is blocked in some sandboxes), then glob fallback
+        exact = os.path.expanduser('~/Downloads/metrics-tracker-automation-53ad2cdd4b65.json')
+        path = exact if os.path.exists(exact) else (glob.glob(os.path.expanduser('~/Downloads/metrics-tracker-automation-*.json')) or [None])[0]
+        cred = service_account.Credentials.from_service_account_file(path, scopes=SCOPES)
     cred.refresh(gtr.Request())
     u = f"https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/{urllib.parse.quote(rng)}"
     return json.loads(urllib.request.urlopen(urllib.request.Request(u, headers={'Authorization': 'Bearer ' + cred.token}), timeout=120).read()).get('values', [])
@@ -436,6 +438,15 @@ def main():
     cohort = {'mcols': mcols, 'target': target, 'rows': cohort_rows, 'detail': cohort_detail,
               'reportMonth': report_ym,
               'tva': {'months': months, 'reportMonth': report_ym, 'byMonth': by_month}}
+    # Guard: if the GL universe is empty (Google Sheets unreachable, e.g. sandboxed local run),
+    # do NOT clobber a good previously-generated cohort/TvA — reuse the prior bev_data.json cohort.
+    if not gls:
+        prev_cohort = (load('bev_data.json') if os.path.exists(os.path.join(REPO, 'bev_data.json')) else {}).get('cards', {}).get('cohort') if os.path.exists(os.path.join(REPO, 'bev_data.json')) else None
+        if prev_cohort and prev_cohort.get('tva', {}).get('byMonth'):
+            any_rows = any(mm.get('byGL', {}).get('rows') for mm in prev_cohort['tva']['byMonth'].values())
+            if any_rows:
+                print('[cohort] sheets unavailable -> preserving previous cohort/TvA (no clobber)')
+                cohort = prev_cohort
 
     # ---- CHURN: sellers who moved HIT -> REVENUE (card 1880), no spend for > 21 days ----
     # BEV card: only days gate (rev_spend gate removed per request).
@@ -666,20 +677,33 @@ def main():
         return [{'k': k, 'sm': agg[k]['sm'], 'sg': agg[k]['sg'], 'so': agg[k]['so']} for k in sorted(agg)]
     spends_1k5k = {'dod': spend_series(lambda d: d), 'wow': spend_series(isoweek), 'mom': spend_series(lambda d: d[:7])}
 
-    # ---- (11) Current Potentials: 1k-5k, w1_pnl > -5 and (w1_spend/7) > 3000 ----
+    # ---- (11) Current Potentials: 1k-5k, card 5206 (Facebook Seller PNL) ----
+    # w-1 PNL > -5 and (w-1 spend / 7) > 3000.  spend = |marketing_spend_without_tax| * 1.18.
+    def q5206(sid):
+        body = {'parameters': [{'type': 'string/=', 'target': ['variable', ['template-tag', 'seller_id']], 'value': sid}]}
+        return req(f"{url}/api/card/5206/query/json", 'POST', body, H)
     potentials = []
+    pot_seen = 0
     for sid in sids:
-        p = pnl11.get(sid)
-        if not p:
+        try:
+            rows = [r for r in q5206(sid) if str(r.get('week_end_date') or '')[:10] and str(r.get('week_end_date'))[:10] < todayISO]
+        except Exception:
             continue
-        budget = p['w1s'] / 7.0
-        if p['w1p'] > -5 and budget > 3000:
+        rows.sort(key=lambda r: str(r.get('week_start_date') or ''), reverse=True)
+        if not rows:
+            continue
+        pot_seen += 1
+        w1p = fnum(rows[0].get('net_profit_percentage'))
+        w1s = abs(fnum(rows[0].get('total_marketing_spend_without_tax'))) * 1.18
+        budget = w1s / 7.0
+        if w1p > -5 and budget > 3000:
             t = rec(sid)
             ysp = round(fnum(t.get('my')) + fnum(t.get('gy')))
             potentials.append({'s': sid, 'n': team.get(sid, {}).get('n', ''), 'gc': team.get(sid, {}).get('gc', ''),
-                               'gm': team.get(sid, {}).get('gm', ''), 'w1p': round(p['w1p'], 1), 'w1s': round(p['w1s']),
+                               'gm': team.get(sid, {}).get('gm', ''), 'w1p': round(w1p, 1), 'w1s': round(w1s),
                                'budget': round(budget), 'ySpend': ysp})
     potentials.sort(key=lambda x: -x['budget'])
+    print(f"[bev2] card 5206 Current Potentials: {len(potentials)} of {pot_seen} 1k-5k sellers with weekly data")
 
     # ---- (12) D7 Paused: 1k-5k sellers with last spend >= 7 days ago (card 10065) ----
     d7_paused = []
@@ -764,8 +788,35 @@ def main():
     google_spend_mom = google_series(lambda d: d[:7])
     google_spend_wow = google_series(isoweek)
 
+    # ---- Spend/Live history (meta/google/blended) from dated snapshots + today ----
+    import gzip
+    sl_history = []
+    snap_dir = os.path.join(REPO, 'snapshots')
+    try:
+        snap_dates = sorted(d for d in os.listdir(snap_dir) if re.match(r'\d{4}-\d{2}-\d{2}$', d))
+    except OSError:
+        snap_dates = []
+    for sd in snap_dates:
+        fp = os.path.join(snap_dir, sd, 'bev_data.json.gz')
+        if not os.path.exists(fp):
+            continue
+        try:
+            with gzip.open(fp, 'rt') as fh:
+                sc2 = json.load(fh).get('cards', {})
+            sl_history.append({'d': sd,
+                               'meta': (sc2.get('sl_meta') or {}).get('pct'),
+                               'google': (sc2.get('sl_google') or {}).get('pct'),
+                               'blended': (sc2.get('sl_blended') or {}).get('pct')})
+        except (OSError, ValueError):
+            continue
+    # append today's live point (dedupe if a snapshot already covers today)
+    if not sl_history or sl_history[-1]['d'] != today.isoformat():
+        sl_history.append({'d': today.isoformat(), 'meta': sl_meta_pct, 'google': sl_google_pct, 'blended': sl_blended_pct})
+    print(f"[bev2] spend/live history: {len(sl_history)} points ({sl_history[0]['d'] if sl_history else '-'}..{sl_history[-1]['d'] if sl_history else '-'})")
+
     bev2 = {
         'window': {'from': good_dates[0] if good_dates else '', 'to': as_of},
+        'slHistory': sl_history,
         'hit2Mom': hit2_mom,
         'hit2ArrSpendMom': hit2_mom_perf,
         'hit2ArrSpendWow': hit2_wow_perf,
