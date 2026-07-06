@@ -587,6 +587,29 @@ def main():
     # channel sets within 1k-5k
     google_sids = {sid for sid in sids if str(rec(sid).get('ga') or '')}
 
+    # ---- card 5207 (Google Seller PNL, per-seller, weekly): Google PNL + spend ----
+    # spend = |total_marketing_spend_without_tax| * 1.18 ; pnl = net_profit_percentage.
+    # w-1 = latest completed week, w-2 = prior. Queried per google seller.
+    def q5207(sid):
+        body = {'parameters': [{'type': 'string/=', 'target': ['variable', ['template-tag', 'seller_id']], 'value': sid}]}
+        return req(f"{url}/api/card/5207/query/json", 'POST', body, H)
+    gpnl = {}
+    todayISO = today.isoformat()
+    for i, sid in enumerate(sorted(google_sids)):
+        try:
+            rows = [r for r in q5207(sid) if str(r.get('week_end_date') or '')[:10] and str(r.get('week_end_date'))[:10] < todayISO]
+        except Exception as _e:
+            continue
+        rows.sort(key=lambda r: str(r.get('week_start_date') or ''), reverse=True)
+        if not rows:
+            continue
+        def wk(r):
+            return {'p': fnum(r.get('net_profit_percentage')), 's': abs(fnum(r.get('total_marketing_spend_without_tax'))) * 1.18}
+        w1 = wk(rows[0]); w2 = wk(rows[1]) if len(rows) > 1 else {'p': 0.0, 's': 0.0}
+        gpnl[sid] = {'w1p': w1['p'], 'w1s': w1['s'], 'w2p': w2['p'], 'w2s': w2['s'],
+                     'w1w': f"{int(rows[0].get('week_year'))}-W{int(rows[0].get('week_number')):02d}"}
+    print(f"[bev2] card 5207 Google PNL: {len(gpnl)}/{len(google_sids)} google sellers with weekly data")
+
     # ---- (1) HIT2 count month-on-month ----
     from collections import Counter as _C2
     def mon_sort_key(m):
@@ -715,7 +738,7 @@ def main():
     def google_bucket(pred, label):
         det = []
         for sid in google_sids:
-            p = pnl11.get(sid)
+            p = gpnl.get(sid)
             if not p:
                 continue
             if pred(p):
