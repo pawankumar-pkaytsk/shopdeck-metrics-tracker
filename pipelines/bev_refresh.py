@@ -559,6 +559,206 @@ def main():
     except Exception as _e:
         print(f"[bev] card 11122 failed: {_e}")
 
+    # ============================================================================
+    # bev2: expanded trackers (see BirdEyeView spec). Real data where available;
+    # everything else the UI renders as a "data awaiting" sample.
+    # ============================================================================
+    def isoweek(dstr):
+        try:
+            y, w, _ = datetime.date.fromisoformat(dstr).isocalendar()
+            return f"{y}-W{w:02d}"
+        except ValueError:
+            return None
+
+    # ---- card 11011: PNL W-1/-2/-3 + weekly spend (keyed by seller) ----
+    pnl11 = {}
+    try:
+        for r in req(f"{url}/api/card/11011/query/json", 'POST', {}, H):
+            sid = str(r.get('seller_id') or '').strip()
+            if not sid:
+                continue
+            pnl11[sid] = {'w1p': fnum(r.get('w1_pnl')), 'w2p': fnum(r.get('w2_pnl')), 'w3p': fnum(r.get('w3_pnl')),
+                          'w1s': fnum(r.get('w1_spend')), 'w2s': fnum(r.get('w2_spend')), 'w3s': fnum(r.get('w3_spend')),
+                          'src': str(r.get('best_source') or '')}
+        print(f"[bev2] card 11011: {len(pnl11)} sellers")
+    except Exception as _e:
+        print(f"[bev2] card 11011 failed: {_e}")
+
+    # channel sets within 1k-5k
+    google_sids = {sid for sid in sids if str(rec(sid).get('ga') or '')}
+
+    # ---- (1) HIT2 count month-on-month ----
+    from collections import Counter as _C2
+    def mon_sort_key(m):
+        p = m.split(); return (int(p[1]), MON3.index(p[0]) + 1)
+    hit2_mom_counts = _C2(x['mon'] for x in hit2_detail)
+    hit2_mom = [{'k': m, 'v': hit2_mom_counts[m]} for m in sorted(hit2_mom_counts, key=mon_sort_key)]
+    # seller -> earliest hit2 achievement date (first of achievement month) for cumulative cohort
+    hit2_ym = {}
+    for x in hit2_detail:
+        p = x['mon'].split(); ym = '%d%02d' % (int(p[1]), MON3.index(p[0]) + 1)
+        sid = x['s']
+        if sid and (sid not in hit2_ym or ym < hit2_ym[sid]):
+            hit2_ym[sid] = ym
+
+    # ---- (2,3) HIT2 ARR & Spend (Overall/Meta/Google) MoM + WoW, cumulative cohort ----
+    def hit2_perf(period_of, cohort_ok):
+        agg = {}
+        for d in good_dates:
+            pk = period_of(d)
+            if not pk:
+                continue
+            for r in by_date[d]:
+                sid = str(r.get('seller_id') or '').strip()
+                cym = hit2_ym.get(sid)
+                if not cym or not cohort_ok(cym, d):
+                    continue
+                a = agg.setdefault(pk, {'am': 0.0, 'sm': 0.0, 'ag': 0.0, 'sg': 0.0, 's': {}})
+                am, sm = fnum(r.get('arr_meta')), fnum(r.get('spend_meta'))
+                ag, sg = fnum(r.get('arr_google')), fnum(r.get('spend_google'))
+                a['am'] += am; a['sm'] += sm; a['ag'] += ag; a['sg'] += sg
+                srow = a['s'].setdefault(sid, {'n': r.get('seller_name') or seller_meta.get(sid, {}).get('n') or '', 'am': 0.0, 'sm': 0.0, 'ag': 0.0, 'sg': 0.0})
+                srow['am'] += am; srow['sm'] += sm; srow['ag'] += ag; srow['sg'] += sg
+        out_list = []
+        for pk in sorted(agg):
+            a = agg[pk]
+            rows = [[s, v['n'], round(v['am']), round(v['sm']), round(v['ag']), round(v['sg'])] for s, v in a['s'].items()]
+            rows.sort(key=lambda x: -(x[2] + x[4]))
+            out_list.append({'k': pk, 'am': round(a['am']), 'sm': round(a['sm']), 'ag': round(a['ag']), 'sg': round(a['sg']),
+                             'ao': round(a['am'] + a['ag']), 'so': round(a['sm'] + a['sg']), 'rows': rows})
+        return out_list
+    hit2_mom_perf = hit2_perf(lambda d: d[:7], lambda cym, d: cym <= d[:7].replace('-', ''))
+    hit2_wow_perf = hit2_perf(isoweek, lambda cym, d: cym <= d[:7].replace('-', ''))
+
+    # ---- (8) Spends for 1k-5k: Day / Week / Month (from perf_by_date, 1k-5k only) ----
+    def spend_series(period_of):
+        agg = {}
+        for d in good_dates:
+            pk = period_of(d)
+            if not pk:
+                continue
+            p = perf_by_date[d]
+            a = agg.setdefault(pk, {'sm': 0, 'sg': 0, 'so': 0})
+            a['sm'] += p['sm']; a['sg'] += p['sg']; a['so'] += p['so']
+        return [{'k': k, 'sm': agg[k]['sm'], 'sg': agg[k]['sg'], 'so': agg[k]['so']} for k in sorted(agg)]
+    spends_1k5k = {'dod': spend_series(lambda d: d), 'wow': spend_series(isoweek), 'mom': spend_series(lambda d: d[:7])}
+
+    # ---- (11) Current Potentials: 1k-5k, w1_pnl > -5 and (w1_spend/7) > 3000 ----
+    potentials = []
+    for sid in sids:
+        p = pnl11.get(sid)
+        if not p:
+            continue
+        budget = p['w1s'] / 7.0
+        if p['w1p'] > -5 and budget > 3000:
+            t = rec(sid)
+            ysp = round(fnum(t.get('my')) + fnum(t.get('gy')))
+            potentials.append({'s': sid, 'n': team.get(sid, {}).get('n', ''), 'gc': team.get(sid, {}).get('gc', ''),
+                               'gm': team.get(sid, {}).get('gm', ''), 'w1p': round(p['w1p'], 1), 'w1s': round(p['w1s']),
+                               'budget': round(budget), 'ySpend': ysp})
+    potentials.sort(key=lambda x: -x['budget'])
+
+    # ---- (12) D7 Paused: 1k-5k sellers with last spend >= 7 days ago (card 10065) ----
+    d7_paused = []
+    for sid in sids:
+        ls = last_spend.get(sid)
+        if not ls or not ls.get('d'):
+            continue
+        try:
+            lsd = datetime.date.fromisoformat(ls['d'])
+        except ValueError:
+            continue
+        days = (today - lsd).days
+        if days >= 7:
+            d7_paused.append({'s': sid, 'n': ls['c'] or team.get(sid, {}).get('n', ''), 'gc': team.get(sid, {}).get('gc', ''),
+                              'gm': team.get(sid, {}).get('gm', ''), 'lastSpend': ls['d'], 'days': days})
+    d7_paused.sort(key=lambda x: -x['days'])
+
+    # ---- (13) NPS month-on-month for 1k-5k ----
+    nps_1k5k = []
+    try:
+        nps_rows = [r for r in load('nps_data.json').get('rows', []) if str(r.get('s') or '') in sids]
+        bym = {}
+        for r in nps_rows:
+            mo = str(r.get('d') or '')[:7]
+            if not mo:
+                continue
+            bym.setdefault(mo, []).append({'s': r['s'], 'sc': fnum(r.get('sc')), 'gc': r.get('gc', ''), 'd': r.get('d')})
+        for mo in sorted(bym):
+            scores = [x['sc'] for x in bym[mo]]
+            n = len(scores)
+            prom = sum(1 for s in scores if s >= 9); det = sum(1 for s in scores if s <= 6)
+            nps_1k5k.append({'k': mo, 'n': n, 'avg': round(sum(scores) / n, 2) if n else None,
+                             'nps': round((prom - det) / n * 100, 1) if n else None,
+                             'rows': [[x['s'], x['gc'], x['sc'], x['d']] for x in bym[mo]]})
+        print(f"[bev2] NPS 1k-5k: {len(nps_1k5k)} months, {sum(m['n'] for m in nps_1k5k)} responses")
+    except Exception as _e:
+        print(f"[bev2] NPS 1k-5k failed: {_e}")
+
+    # ---- (16) ARR buckets Top 20 / Mid 60 / Bottom 20 for 1k-5k (yesterday ARR) ----
+    def arr_buckets(pairs):
+        pairs = [p for p in pairs if p[2] > 0]
+        pairs.sort(key=lambda x: -x[2])
+        n = len(pairs)
+        if not n:
+            return None
+        t = max(1, round(n * 0.2)); b = max(1, round(n * 0.2))
+        top, mid, bot = pairs[:t], pairs[t:n - b], pairs[n - b:]
+        def summ(grp, label):
+            return {'label': label, 'count': len(grp), 'arr': round(sum(x[2] for x in grp)),
+                    'rows': [[x[0], x[1], round(x[2])] for x in grp]}
+        return [summ(top, 'Top 20%'), summ(mid, 'Mid 60%'), summ(bot, 'Bottom 20%')]
+    arr_1k5k_pairs = [[r[0], seller_meta.get(r[0], {}).get('n', ''), r[5]] for r in perf_by_date.get(as_of, {}).get('rows', [])]
+    arr_buckets_1k5k = arr_buckets(arr_1k5k_pairs)
+
+    # ---- Google 1k-5k: Bucket Health / Potentials / Objective (card 11011 + google channel) ----
+    def google_bucket(pred, label):
+        det = []
+        for sid in google_sids:
+            p = pnl11.get(sid)
+            if not p:
+                continue
+            if pred(p):
+                det.append({'s': sid, 'n': team.get(sid, {}).get('n', ''), 'gc': team.get(sid, {}).get('gc', ''),
+                            'w1p': round(p['w1p'], 1), 'w2p': round(p['w2p'], 1), 'w1s': round(p['w1s']), 'w2s': round(p['w2s'])})
+        det.sort(key=lambda x: -x['w1s'])
+        return {'label': label, 'value': len(det), 'detail': det}
+    g_bucket_health = google_bucket(lambda p: p['w1p'] > -20 and p['w1s'] > 28000, 'Google Bucket Health (w-1 PNL > -20, spend > 28k)')
+    g_potentials = google_bucket(lambda p: p['w1p'] > 5 and p['w1s'] > 28000, 'Google Potentials (w-1 PNL > 5, spend > 28k)')
+    g_objective = google_bucket(lambda p: p['w1p'] > 5 and p['w2p'] > 5 and (p['w1s'] + p['w2s']) > 70000, 'Google Objective (w-1 & w-2 PNL > 5, w1+w2 spend > 70k)')
+
+    # ---- Google 1k-5k Spends & Active sellers MoM + WoW (from perf_by_date google fields) ----
+    def google_series(period_of):
+        agg = {}
+        for d in good_dates:
+            pk = period_of(d)
+            if not pk:
+                continue
+            act = sum(1 for r in by_date[d] if str(r.get('seller_id') or '') in google_sids and fnum(r.get('spend_google')) > 1)
+            a = agg.setdefault(pk, {'sg': 0, 'actSum': 0, 'days': 0})
+            a['sg'] += perf_by_date[d]['sg']; a['actSum'] += act; a['days'] += 1
+        return [{'k': k, 'sg': agg[k]['sg'], 'activeAvg': round(agg[k]['actSum'] / agg[k]['days'])} for k in sorted(agg)]
+    google_spend_mom = google_series(lambda d: d[:7])
+    google_spend_wow = google_series(isoweek)
+
+    bev2 = {
+        'window': {'from': good_dates[0] if good_dates else '', 'to': as_of},
+        'hit2Mom': hit2_mom,
+        'hit2ArrSpendMom': hit2_mom_perf,
+        'hit2ArrSpendWow': hit2_wow_perf,
+        'spends1k5k': spends_1k5k,
+        'potentials': {'value': len(potentials), 'detail': potentials},
+        'd7Paused': {'value': len(d7_paused), 'detail': d7_paused},
+        'nps1k5k': nps_1k5k,
+        'arrBuckets1k5k': arr_buckets_1k5k,
+        'google': {
+            'bucketHealth': g_bucket_health, 'potentials': g_potentials, 'objective': g_objective,
+            'spendMom': google_spend_mom, 'spendWow': google_spend_wow,
+            'sellerCount': len(google_sids),
+        },
+    }
+    print(f"[bev2] potentials={len(potentials)} d7paused={len(d7_paused)} gBucketHealth={g_bucket_health['value']} gPotentials={g_potentials['value']} gObjective={g_objective['value']}")
+
     out = {
         'generatedAt': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
         'asOfDate': as_of, 'weekMon': monS, 'weekSun': sunS, 'last7Cutoff': cut7, 'last7End': today.isoformat(),
@@ -586,6 +786,7 @@ def main():
             'call_meta':   {'pct': cm_pct, 'num': cm_done, 'den': cm_total, 'detail': cm_det},
             'call_google': {'pct': cg_pct, 'num': cg_done, 'den': cg_total, 'detail': cg_det},
         },
+        'bev2': bev2,
     }
     json.dump(out, open(OUT, 'w'), separators=(',', ':'))
     print(f"[bev] as-of {as_of} · week {monS}..{sunS} · 1k-5k accounts={len(sids)} · HIT2 total={len(hit2_detail)}")
