@@ -627,6 +627,57 @@ def main():
         p = m.split(); return (int(p[1]), MON3.index(p[0]) + 1)
     hit2_mom_counts = _C2(x['mon'] for x in hit2_detail)
     hit2_mom = [{'k': m, 'v': hit2_mom_counts[m]} for m in sorted(hit2_mom_counts, key=mon_sort_key)]
+
+    # ---- HIT1 -> HIT2 conversion cohort (1k-5k) : rows = HIT1 month, cols = M0..M5 conversion % ----
+    # Population = sellers on the HITS team OR who reached HIT2 (converters leave the HITS team),
+    # grouped by their HIT1 month (hit_month/hit_year). M{age} = HIT2 conversions at (hit2 - hit1) months.
+    H2_TARGET_VEC = {0: 0, 1: 9, 2: 15, 3: 4, 4: 5, 5: 0}   # per-age target % (from plan)
+    H2_MCOLS = ['M0', 'M1', 'M2', 'M3', 'M4', 'M5']
+    H2_GRAND_TARGET = sum(H2_TARGET_VEC.values())
+    def _ymv(y, m):
+        try: return int(y) * 100 + int(m)
+        except (TypeError, ValueError): return None
+    cur_ym = today.year * 100 + today.month
+    h2coh = {}  # ym -> {'n':int, 'sellers':[], 'cells':{age:[detail]}}
+    for r in hitrows:
+        is_h = str(r.get('team') or '').strip().upper() == 'HITS' or str(r.get('hit2')).strip() in ('1', '1.0', 'True', 'true')
+        if not is_h:
+            continue
+        h1 = _ymv(r.get('hit_year'), r.get('hit_month'))
+        if not h1 or h1 < 202510:
+            continue
+        sid = str(r.get('seller_id') or '').strip()
+        nm = str(r.get('seller_name') or '')
+        c = h2coh.setdefault(h1, {'n': 0, 'sellers': [], 'cells': defaultdict(list)})
+        c['n'] += 1
+        c['sellers'].append({'s': sid, 'n': nm})
+        if str(r.get('hit2')).strip() in ('1', '1.0', 'True', 'true'):
+            h2 = _ymv(r.get('hit2_year'), r.get('hit2_month'))
+            if h2:
+                age = max(0, (h2 // 100 - h1 // 100) * 12 + (h2 % 100 - h1 % 100))
+                if age < len(H2_MCOLS):
+                    c['cells'][age].append({'s': sid, 'n': nm, 'hit1': '%d-%02d' % (h1 // 100, h1 % 100), 'hit2': '%d-%02d' % (h2 // 100, h2 % 100), 'age': 'M%d' % age})
+    MON3b = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    hit2_cohort_rows = []
+    for ym in sorted(h2coh):
+        c = h2coh[ym]; n = c['n']
+        maturity = min(len(H2_MCOLS) - 1, (cur_ym // 100 - ym // 100) * 12 + (cur_ym % 100 - ym % 100))
+        cells_pct = {('M%d' % a): (round(len(c['cells'][a]) / n * 100) if n else 0) for a in range(len(H2_MCOLS))}
+        cells_cnt = {('M%d' % a): len(c['cells'][a]) for a in range(len(H2_MCOLS))}
+        conv = sum(len(v) for v in c['cells'].values())
+        grand = round(conv / n * 100) if n else 0
+        tgt = sum(H2_TARGET_VEC.get(a, 0) for a in range(0, maturity + 1))
+        hit2_cohort_rows.append({
+            'ym': '%d-%02d' % (ym // 100, ym % 100),
+            'label': MON3b[ym % 100 - 1] + '-' + str(ym // 100)[2:],
+            'n': n, 'cells': cells_pct, 'counts': cells_cnt, 'conv': conv, 'grand': grand,
+            'target': tgt, 'delta': grand - tgt, 'maturity': maturity,
+            'detail': {('M%d' % a): c['cells'][a] for a in range(len(H2_MCOLS)) if c['cells'][a]},
+            'sellers': c['sellers'],
+        })
+    hit2_cohort = {'mcols': H2_MCOLS, 'targetVec': {('M%d' % a): H2_TARGET_VEC.get(a, 0) for a in range(len(H2_MCOLS))},
+                   'grandTarget': H2_GRAND_TARGET, 'rows': hit2_cohort_rows}
+    print(f"[bev2] HIT1->HIT2 cohort: {len(hit2_cohort_rows)} cohort months")
     # seller -> earliest hit2 achievement date (first of achievement month) for cumulative cohort
     hit2_ym = {}
     for x in hit2_detail:
@@ -818,6 +869,7 @@ def main():
         'window': {'from': good_dates[0] if good_dates else '', 'to': as_of},
         'slHistory': sl_history,
         'hit2Mom': hit2_mom,
+        'hit2Cohort': hit2_cohort,
         'hit2ArrSpendMom': hit2_mom_perf,
         'hit2ArrSpendWow': hit2_wow_perf,
         'spends1k5k': spends_1k5k,
