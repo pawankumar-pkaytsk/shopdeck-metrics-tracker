@@ -640,11 +640,13 @@ def main():
     cur_ym = today.year * 100 + today.month
     h2coh = {}  # ym -> {'n':int, 'sellers':[], 'cells':{age:[detail]}}
     for r in hitrows:
+        if str(r.get('good_seller')).strip() in ('1', '1.0', 'True', 'true'):
+            continue   # exclude good sellers — 1k-5k funnel only
         is_h = str(r.get('team') or '').strip().upper() == 'HITS' or str(r.get('hit2')).strip() in ('1', '1.0', 'True', 'true')
         if not is_h:
             continue
         h1 = _ymv(r.get('hit_year'), r.get('hit_month'))
-        if not h1 or h1 < 202510:
+        if not h1 or h1 < 202602:   # cohorts start Feb-26
             continue
         sid = str(r.get('seller_id') or '').strip()
         nm = str(r.get('seller_name') or '')
