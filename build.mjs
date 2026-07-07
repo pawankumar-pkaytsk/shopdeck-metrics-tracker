@@ -127,6 +127,8 @@ fs.writeFileSync(path.join(OUT, 'index.html'), template);
 
 // copy data JSON next to index.html (the app fetches them by relative path)
 for (const f of fs.readdirSync('.')) if (f.endsWith('.json') && f !== 'package.json' && f !== 'package-lock.json') fs.copyFileSync(f, path.join(OUT, f));
+// copy sharded static data fetched on demand by the app (per-seller call records)
+if (fs.existsSync('calls')) fs.cpSync('calls', path.join(OUT, 'calls'), { recursive: true });
 
 console.log(`[build] public/ ready · ${nPlain} JS resources, ${nBabelChunks} compiled JSX chunks, main.js · Babel dropped: ${droppedBabel}`);
 
