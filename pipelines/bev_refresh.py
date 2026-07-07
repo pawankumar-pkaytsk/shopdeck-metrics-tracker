@@ -570,6 +570,53 @@ def main():
     except Exception as _e:
         print(f"[bev] card 11122 failed: {_e}")
 
+    # Per-seller detail behind the Google week-wise chart (card 11481 = 11122's base rows).
+    # Lets each chart cell/point drill down to the exact contributing sellers. Cumulative spend
+    # computed per (cohort, seller) over offsets. Quota-resilient: falls back to previous file.
+    try:
+        det_rows = req(f"{url}/api/card/11481/query/json", 'POST', {}, H)
+        acc = {'benchmark': defaultdict(list), 'cohort': defaultdict(list)}
+        cum_by = defaultdict(lambda: defaultdict(float))  # (cohort,seller) -> offset -> spend
+        per_seller = defaultdict(dict)  # (cohort,seller) -> offset -> row dict
+        for r in det_rows:
+            ch = str(r.get('cohort') or '').strip()
+            if ch not in acc:
+                continue
+            sid = str(r.get('seller_id') or '').strip()
+            try:
+                off = int(r.get('weeks_since_golive'))
+            except (TypeError, ValueError):
+                continue
+            if off < 0 or off > 10:
+                continue
+            per_seller[(ch, sid)][off] = {
+                'rto': fnum(r.get('rto_percentage')) if r.get('rto_percentage') is not None else None,
+                'sp': abs(fnum(r.get('spend_ex_tax'))), 'gmv': fnum(r.get('gmv')),
+                'ord': fnum(r.get('total_orders')), 'awb': fnum(r.get('awb_nc')),
+            }
+        for (ch, sid), offs in per_seller.items():
+            run = 0.0
+            for off in range(11):
+                if off in offs:
+                    v = offs[off]; run += v['sp']
+                    acc[ch][off].append([sid, (round(v['rto'], 2) if v['rto'] is not None else None),
+                                         round(v['sp']), round(v['gmv']), round(v['ord']), round(run), 1 if v['gmv'] > 0 else 0])
+        detail = {ch: {str(off): acc[ch][off] for off in acc[ch]} for ch in acc}
+        if google_wk is None:
+            google_wk = {'weeks': ['W%d' % i for i in range(11)], 'groups': []}
+        google_wk['sellerDetail'] = detail
+        google_wk['detailCols'] = ['seller_id', 'rto_%', 'spend', 'gmv', 'orders', 'cum_spend', 'active']
+        print(f"[bev] card 11481 seller detail: benchmark offsets={len(detail['benchmark'])} cohort offsets={len(detail['cohort'])}")
+    except Exception as _e:
+        print(f"[bev] card 11481 failed ({_e}) -> reuse previous seller detail")
+        try:
+            prev_gw = (load('bev_data.json').get('cards', {}) or {}).get('googleWk') or {}
+            if google_wk is not None and prev_gw.get('sellerDetail'):
+                google_wk['sellerDetail'] = prev_gw['sellerDetail']
+                google_wk['detailCols'] = prev_gw.get('detailCols')
+        except Exception:
+            pass
+
     # ============================================================================
     # bev2: expanded trackers (see BirdEyeView spec). Real data where available;
     # everything else the UI renders as a "data awaiting" sample.
