@@ -680,6 +680,81 @@ def main():
     hit2_cohort = {'mcols': H2_MCOLS, 'targetVec': {('M%d' % a): H2_TARGET_VEC.get(a, 0) for a in range(len(H2_MCOLS))},
                    'grandTarget': H2_GRAND_TARGET, 'rows': hit2_cohort_rows}
     print(f"[bev2] HIT1->HIT2 cohort: {len(hit2_cohort_rows)} cohort months")
+
+    # ---- ARR cohort matrices (1k-5k) by channel (meta/google/both), 3 populations ----
+    # rows = HIT1 month, M{age} = avg ARR/seller at that cohort age. Channel ARR from card 10892
+    # (currently ~30d window; will deepen to 6 months later). Populations: HIT1+HIT2, HIT1-only, HIT2-only.
+    ARR_MCOLS = ['M0', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6']
+    arr_target = cohort.get('target', {})  # per-age ARR target from card 11020 (reuse existing cohort targets)
+    # HIT1 month, HIT2 flag, name — from hitrows (10453), 1k-5k = HITS or converted, exclude good sellers
+    hit1_of, is_hit2_of, name_of = {}, {}, {}
+    for r in hitrows:
+        if str(r.get('good_seller')).strip() in ('1', '1.0', 'True', 'true'):
+            continue
+        if not (str(r.get('team') or '').strip().upper() == 'HITS' or str(r.get('hit2')).strip() in ('1', '1.0', 'True', 'true')):
+            continue
+        sid = str(r.get('seller_id') or '').strip()
+        h1 = _ymv(r.get('hit_year'), r.get('hit_month'))
+        if not sid or not h1 or h1 < 202602:
+            continue
+        hit1_of[sid] = h1
+        is_hit2_of[sid] = str(r.get('hit2')).strip() in ('1', '1.0', 'True', 'true')
+        name_of[sid] = str(r.get('seller_name') or '')
+    # per-seller per-month avg channel ARR from card 10892 (by_date already fetched)
+    smon = {}  # sid -> 'YYYYMM' -> {'m':sum,'g':sum,'t':sum,'d':days}
+    for d in good_dates:
+        mk = int(d[:4]) * 100 + int(d[5:7])
+        for r in by_date[d]:
+            sid = str(r.get('seller_id') or '').strip()
+            if sid not in hit1_of:
+                continue
+            cell = smon.setdefault(sid, {}).setdefault(mk, {'m': 0.0, 'g': 0.0, 't': 0.0, 'd': 0})
+            cell['m'] += fnum(r.get('arr_meta')); cell['g'] += fnum(r.get('arr_google')); cell['t'] += fnum(r.get('total_arr')); cell['d'] += 1
+
+    def build_arr_variant(member):
+        # cohort sizes per hit1 month
+        coh_n = defaultdict(int)
+        for sid, h1 in hit1_of.items():
+            if member(sid):
+                coh_n[h1] += 1
+        rows = []
+        for h1 in sorted(coh_n):
+            n = coh_n[h1]
+            # accumulate per age per channel
+            acc = {a: {'m': 0.0, 'g': 0.0, 't': 0.0, 'det': []} for a in range(len(ARR_MCOLS))}
+            for sid, sh1 in hit1_of.items():
+                if sh1 != h1 or not member(sid):
+                    continue
+                for mk, v in smon.get(sid, {}).items():
+                    age = (mk // 100 - h1 // 100) * 12 + (mk % 100 - h1 % 100)
+                    if 0 <= age < len(ARR_MCOLS) and v['d']:
+                        mm, gg, tt = v['m'] / v['d'], v['g'] / v['d'], v['t'] / v['d']
+                        acc[age]['m'] += mm; acc[age]['g'] += gg; acc[age]['t'] += tt
+                        acc[age]['det'].append({'s': sid, 'n': name_of.get(sid, ''), 'meta': round(mm), 'google': round(gg), 'both': round(tt)})
+            cells = {ch: {} for ch in ('meta', 'google', 'both')}
+            counts, detail = {}, {}
+            for a in range(len(ARR_MCOLS)):
+                mc = 'M%d' % a
+                has = bool(acc[a]['det'])
+                cells['meta'][mc] = round(acc[a]['m'] / n) if (n and has) else None
+                cells['google'][mc] = round(acc[a]['g'] / n) if (n and has) else None
+                cells['both'][mc] = round(acc[a]['t'] / n) if (n and has) else None
+                counts[mc] = len(acc[a]['det'])
+                if has:
+                    detail[mc] = sorted(acc[a]['det'], key=lambda x: -x['both'])
+            rows.append({'ym': '%d-%02d' % (h1 // 100, h1 % 100), 'label': MON3b[h1 % 100 - 1] + '-' + str(h1 // 100)[2:],
+                         'n': n, 'cells': cells, 'counts': counts, 'detail': detail})
+        return rows
+    arr_cohort = {
+        'mcols': ARR_MCOLS, 'target': {mc: arr_target.get(mc) for mc in ARR_MCOLS},
+        'window': {'from': good_dates[0] if good_dates else '', 'to': as_of},
+        'variants': {
+            'hit12': build_arr_variant(lambda s: True),
+            'hit1': build_arr_variant(lambda s: not is_hit2_of.get(s)),
+            'hit2': build_arr_variant(lambda s: is_hit2_of.get(s)),
+        },
+    }
+    print(f"[bev2] ARR cohort (channel): hit12={len(arr_cohort['variants']['hit12'])} hit1={len(arr_cohort['variants']['hit1'])} hit2={len(arr_cohort['variants']['hit2'])} rows")
     # seller -> earliest hit2 achievement date (first of achievement month) for cumulative cohort
     hit2_ym = {}
     for x in hit2_detail:
@@ -872,6 +947,7 @@ def main():
         'slHistory': sl_history,
         'hit2Mom': hit2_mom,
         'hit2Cohort': hit2_cohort,
+        'arrCohort': arr_cohort,
         'hit2ArrSpendMom': hit2_mom_perf,
         'hit2ArrSpendWow': hit2_wow_perf,
         'spends1k5k': spends_1k5k,
