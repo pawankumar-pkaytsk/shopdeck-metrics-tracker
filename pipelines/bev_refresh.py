@@ -678,9 +678,11 @@ def main():
     # ---- HIT1 -> HIT2 conversion cohort (1k-5k) : rows = HIT1 month, cols = M0..M5 conversion % ----
     # Population = sellers on the HITS team OR who reached HIT2 (converters leave the HITS team),
     # grouped by their HIT1 month (hit_month/hit_year). M{age} = HIT2 conversions at (hit2 - hit1) months.
-    H2_TARGET_VEC = {0: 0, 1: 9, 2: 15, 3: 4, 4: 5, 5: 0}   # per-age target % (from plan)
+    H2_TARGET_VEC = {0: 0, 1: 9, 2: 15, 3: 4, 4: 5, 5: 0}   # HIT2 per-age target % (from plan)
+    GHIT_TARGET_VEC = {0: 10, 1: 10, 2: 10, 3: 10, 4: 5, 5: 0}  # Google-HIT per-age target %
     H2_MCOLS = ['M0', 'M1', 'M2', 'M3', 'M4', 'M5']
     H2_GRAND_TARGET = sum(H2_TARGET_VEC.values())
+    GHIT_GRAND_TARGET = sum(GHIT_TARGET_VEC.values())
     def _ymv(y, m):
         try: return int(y) * 100 + int(m)
         except (TypeError, ValueError): return None
@@ -765,7 +767,7 @@ def main():
         maturity = min(len(H2_MCOLS) - 1, (cur_ym // 100 - ym // 100) * 12 + (cur_ym % 100 - ym % 100))
         conv = sum(len(v) for v in c['cells'].values())
         grand = round(conv / n * 100) if n else 0
-        tgt = sum(H2_TARGET_VEC.get(a, 0) for a in range(0, maturity + 1))
+        tgt = sum(GHIT_TARGET_VEC.get(a, 0) for a in range(0, maturity + 1))
         ghc_rows.append({
             'ym': '%d-%02d' % (ym // 100, ym % 100), 'label': MON3b[ym % 100 - 1] + '-' + str(ym // 100)[2:],
             'n': n, 'cells': {('M%d' % a): (round(len(c['cells'][a]) / n * 100) if n else 0) for a in range(len(H2_MCOLS))},
@@ -773,8 +775,8 @@ def main():
             'target': tgt, 'delta': grand - tgt, 'maturity': maturity,
             'detail': {('M%d' % a): c['cells'][a] for a in range(len(H2_MCOLS)) if c['cells'][a]}, 'sellers': c['sellers'],
         })
-    google_hit_cohort = {'mcols': H2_MCOLS, 'targetVec': {('M%d' % a): H2_TARGET_VEC.get(a, 0) for a in range(len(H2_MCOLS))},
-                         'grandTarget': H2_GRAND_TARGET, 'rows': ghc_rows}
+    google_hit_cohort = {'mcols': H2_MCOLS, 'targetVec': {('M%d' % a): GHIT_TARGET_VEC.get(a, 0) for a in range(len(H2_MCOLS))},
+                         'grandTarget': GHIT_GRAND_TARGET, 'rows': ghc_rows}
     print(f"[bev2] HIT1->Google HIT cohort: {len(ghc_rows)} cohort months")
 
     # ---- ARR cohort matrices (1k-5k) by channel (meta/google/both), 3 populations ----
@@ -796,16 +798,31 @@ def main():
         hit1_of[sid] = h1
         is_hit2_of[sid] = str(r.get('hit2')).strip() in ('1', '1.0', 'True', 'true')
         name_of[sid] = str(r.get('seller_name') or '')
-    # per-seller per-month avg channel ARR from card 10892 (by_date already fetched)
-    smon = {}  # sid -> 'YYYYMM' -> {'m':sum,'g':sum,'t':sum,'d':days}
-    for d in good_dates:
-        mk = int(d[:4]) * 100 + int(d[5:7])
-        for r in by_date[d]:
+    # per-seller per-month avg channel ARR from card 10469 (Meta/Google/All ARR, ~6-month history)
+    smon = {}  # sid -> monthKey(int YYYYMM) -> {'m':sum,'g':sum,'t':sum,'d':days}
+    arr_window = {'from': '', 'to': ''}
+    try:
+        rows10469 = req(f"{url}/api/card/10469/query/json", 'POST', {}, H)
+        ad = []
+        for r in rows10469:
             sid = str(r.get('seller_id') or '').strip()
             if sid not in hit1_of:
                 continue
+            am, ag, at = r.get('ARR__Meta__c'), r.get('ARR__Google__c'), r.get('ARR_All__c')
+            if am is None and ag is None and at is None:
+                continue
+            ds = str(r.get('date') or '')[:10]
+            if not ds:
+                continue
+            ad.append(ds)
+            mk = int(ds[:4]) * 100 + int(ds[5:7])
             cell = smon.setdefault(sid, {}).setdefault(mk, {'m': 0.0, 'g': 0.0, 't': 0.0, 'd': 0})
-            cell['m'] += fnum(r.get('arr_meta')); cell['g'] += fnum(r.get('arr_google')); cell['t'] += fnum(r.get('total_arr')); cell['d'] += 1
+            cell['m'] += fnum(am); cell['g'] += fnum(ag); cell['t'] += fnum(at); cell['d'] += 1
+        if ad:
+            arr_window = {'from': min(ad), 'to': max(ad)}
+        print(f"[bev2] ARR cohort source card 10469: {len(smon)} cohort sellers with ARR · window {arr_window}")
+    except Exception as _e:
+        print(f"[bev2] card 10469 failed ({_e}) -> ARR cohort empty")
 
     def build_arr_variant(member):
         # cohort sizes per hit1 month
@@ -843,7 +860,7 @@ def main():
         return rows
     arr_cohort = {
         'mcols': ARR_MCOLS, 'target': {mc: arr_target.get(mc) for mc in ARR_MCOLS},
-        'window': {'from': good_dates[0] if good_dates else '', 'to': as_of},
+        'window': arr_window,
         'variants': {
             'hit12': build_arr_variant(lambda s: True),
             'hit1': build_arr_variant(lambda s: not is_hit2_of.get(s)),
