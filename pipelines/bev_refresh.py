@@ -884,6 +884,41 @@ def main():
                     _mm = round(_both * _m0 / (_m0 + _g0)); _row['cells']['meta'][_mc] = _mm; _row['cells']['google'][_mc] = _both - _mm
                 else:
                     _row['cells']['meta'][_mc] = None; _row['cells']['google'][_mc] = None
+    # Anchor HIT1-only / HIT2-only to the authoritative combined: keep 11020 total, split by the
+    # 10469 proportion so (hit1*n1 + hit2*n2)/n_all reconciles to the combined value.
+    _h12 = {r['ym']: r for r in arr_cohort['variants']['hit12']}
+    _h1 = {r['ym']: r for r in arr_cohort['variants']['hit1']}
+    _h2 = {r['ym']: r for r in arr_cohort['variants']['hit2']}
+    def _shr(row, mc):
+        b = row['cells']['both'].get(mc); m = row['cells']['meta'].get(mc)
+        return (m / b) if (b and m is not None and b > 0) else None
+    def _setc(row, mc, val):
+        if row is None:
+            return
+        if val is None:
+            row['cells']['both'][mc] = None; row['cells']['meta'][mc] = None; row['cells']['google'][mc] = None; return
+        sh = _shr(row, mc); row['cells']['both'][mc] = val
+        if sh is not None:
+            _mm2 = round(val * sh); row['cells']['meta'][mc] = _mm2; row['cells']['google'][mc] = val - _mm2
+        else:
+            row['cells']['meta'][mc] = None; row['cells']['google'][mc] = None
+    for _ym, _c in _h12.items():
+        _r1, _r2 = _h1.get(_ym), _h2.get(_ym)
+        _n1 = _r1['n'] if _r1 else 0; _n2 = _r2['n'] if _r2 else 0
+        for _mc in ARR_MCOLS:
+            _V = _c['cells']['both'].get(_mc)
+            _s1 = (_r1['cells']['both'].get(_mc) * _n1) if (_r1 and _r1['cells']['both'].get(_mc) is not None) else None
+            _s2 = (_r2['cells']['both'].get(_mc) * _n2) if (_r2 and _r2['cells']['both'].get(_mc) is not None) else None
+            _tot = (_s1 or 0) + (_s2 or 0)
+            if _V is None or _tot <= 0:
+                if _s1 is None:
+                    _setc(_r1, _mc, None)
+                if _s2 is None:
+                    _setc(_r2, _mc, None)
+                continue
+            _total = _V * (_n1 + _n2)
+            _setc(_r1, _mc, round(_total * (_s1 or 0) / _tot / _n1) if _n1 else None)
+            _setc(_r2, _mc, round(_total * (_s2 or 0) / _tot / _n2) if _n2 else None)
     # seller -> earliest hit2 achievement date (first of achievement month) for cumulative cohort
     hit2_ym = {}
     for x in hit2_detail:
