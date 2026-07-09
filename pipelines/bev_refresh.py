@@ -868,6 +868,22 @@ def main():
         },
     }
     print(f"[bev2] ARR cohort (channel): hit12={len(arr_cohort['variants']['hit12'])} hit1={len(arr_cohort['variants']['hit1'])} hit2={len(arr_cohort['variants']['hit2'])} rows")
+    # HIT1+HIT2 combined 'both' must match the authoritative ARR cohort (card 11020, full history).
+    # Use 11020 per-cell values for 'both'; split Meta/Google proportionally via the 10469 ratio.
+    _ref11020 = {r['ym']: r['v'] for r in cohort.get('rows', [])}
+    for _row in arr_cohort['variants']['hit12']:
+        _rv = _ref11020.get(_row['ym'].replace('-', ''), {})
+        for _mc in ARR_MCOLS:
+            _both = _rv.get(_mc)
+            _m0, _g0 = _row['cells']['meta'].get(_mc), _row['cells']['google'].get(_mc)
+            if _both is None:
+                _row['cells']['both'][_mc] = None; _row['cells']['meta'][_mc] = None; _row['cells']['google'][_mc] = None
+            else:
+                _row['cells']['both'][_mc] = _both
+                if _m0 is not None and _g0 is not None and (_m0 + _g0) > 0:
+                    _mm = round(_both * _m0 / (_m0 + _g0)); _row['cells']['meta'][_mc] = _mm; _row['cells']['google'][_mc] = _both - _mm
+                else:
+                    _row['cells']['meta'][_mc] = None; _row['cells']['google'][_mc] = None
     # seller -> earliest hit2 achievement date (first of achievement month) for cumulative cohort
     hit2_ym = {}
     for x in hit2_detail:
