@@ -75,6 +75,9 @@ jobs:
       - name: GC View (depends on golive/ts/scaling/hit1/task)
         continue-on-error: true
         run: python pipelines/gc_view_refresh.py
+      - name: GM View (depends on gc/gm-compliance)
+        continue-on-error: true
+        run: python pipelines/gm_view_refresh.py
       - name: L&T View (depends on gc/golive/task/hit1)
         continue-on-error: true
         run: python pipelines/lt_refresh.py
