@@ -542,12 +542,12 @@ def main():
     except Exception as _e:
         print(f"[bev] card 11115 failed: {_e}")
 
-    # Google week-wise RTO / S-GMV / Spend (card 11122): metric-wise rows, columns W0..W10.
-    # Split into 4 groups of 4 metrics each for grouped line charts + adjacent numbers.
+    # Google Metrics Benchmarking (card 11576): metric-wise rows, columns W0..W10.
+    # 4 groups of 4 metrics for grouped line charts + adjacent numbers.
     google_wk = None
     try:
-        g11122 = req(f"{url}/api/card/11122/query/json", 'POST', {}, H)
-        by_metric = {str(r.get('metric') or '').strip(): r for r in g11122}
+        g11576 = req(f"{url}/api/card/11576/query/json", 'POST', {}, H)
+        by_metric = {str(r.get('metric') or '').strip(): r for r in g11576}
         weeks = ['W%d' % i for i in range(11)]
         GW_MAP = [
             ('Seller Count', [('bm_seller_count', 'Benchmark Seller Count'), ('bm_seller_count_active', 'Benchmark Active Seller Count'), ('seller_count', 'Seller Count'), ('seller_count_active', 'Active Seller Count')]),
@@ -560,55 +560,51 @@ def main():
             except (TypeError, ValueError): return None
         groups = []
         for title, mets in GW_MAP:
-            series = []
-            for key, label in mets:
-                row = by_metric.get(key, {})
-                series.append({'label': label, 'vals': [_gnum(row.get(wk)) for wk in weeks]})
+            series = [{'label': label, 'vals': [_gnum(by_metric.get(key, {}).get(wk)) for wk in weeks]} for key, label in mets]
             groups.append({'title': title, 'series': series})
         google_wk = {'weeks': weeks, 'groups': groups}
-        print(f"[bev] google week-wise (card 11122): {len(g11122)} metrics -> {len(groups)} groups")
+        print(f"[bev] google metrics benchmarking (card 11576): {len(g11576)} metrics -> {len(groups)} groups")
     except Exception as _e:
-        print(f"[bev] card 11122 failed: {_e}")
+        print(f"[bev] card 11576 failed: {_e}")
 
-    # Per-seller detail behind the Google week-wise chart (card 11481 = 11122's base rows).
-    # Lets each chart cell/point drill down to the exact contributing sellers. Cumulative spend
-    # computed per (cohort, seller) over offsets. Quota-resilient: falls back to previous file.
+    # Per-seller detail behind the chart: derived from 11576's own bm_weekly / test_weekly CTEs,
+    # run ad-hoc (export endpoint, no row cap) so drill-downs reconcile exactly to 11576.
     try:
-        det_rows = req(f"{url}/api/card/11481/query/json", 'POST', {}, H)
+        c76 = req(f"{url}/api/card/11576", 'GET', None, H)
+        _st = c76['dataset_query']['stages'][0]; _nat = _st['native']; _tt = _st['template-tags']
+        _base = _nat[:_nat.find('/* ── Final pivot')]
+        _sel = ("SELECT 'benchmark' AS cohort, seller_id, week_rel, rto_percentage, awb_nc, ABS(total_marketing_spend) AS spend, total_orders_gmv AS gmv, is_active FROM bm_weekly"
+                " UNION ALL "
+                "SELECT 'cohort' AS cohort, seller_id, week_rel, rto_percentage, awb_nc, ABS(total_marketing_spend) AS spend, total_orders_gmv AS gmv, is_active FROM test_weekly")
+        _dq = {'database': c76['dataset_query'].get('database', 6), 'type': 'native', 'native': {'query': _base + _sel, 'template-tags': _tt}}
+        _payload = urllib.parse.urlencode({'query': json.dumps(_dq)}).encode()
+        _dreq = urllib.request.Request(f"{url}/api/dataset/json", data=_payload, method='POST',
+                                       headers={'X-Metabase-Session': tok, 'Content-Type': 'application/x-www-form-urlencoded'})
+        det_rows = json.loads(urllib.request.urlopen(_dreq, timeout=600).read())
         acc = {'benchmark': defaultdict(list), 'cohort': defaultdict(list)}
-        cum_by = defaultdict(lambda: defaultdict(float))  # (cohort,seller) -> offset -> spend
-        per_seller = defaultdict(dict)  # (cohort,seller) -> offset -> row dict
         for r in det_rows:
             ch = str(r.get('cohort') or '').strip()
             if ch not in acc:
                 continue
             sid = str(r.get('seller_id') or '').strip()
             try:
-                off = int(r.get('weeks_since_golive'))
+                wk = int(r.get('week_rel'))
             except (TypeError, ValueError):
                 continue
-            if off < 0 or off > 10:
+            if wk < 0 or wk > 10:
                 continue
-            per_seller[(ch, sid)][off] = {
-                'rto': fnum(r.get('rto_percentage')) if r.get('rto_percentage') is not None else None,
-                'sp': abs(fnum(r.get('spend_ex_tax'))), 'gmv': fnum(r.get('gmv')),
-                'ord': fnum(r.get('total_orders')), 'awb': fnum(r.get('awb_nc')),
-            }
-        for (ch, sid), offs in per_seller.items():
-            run = 0.0
-            for off in range(11):
-                if off in offs:
-                    v = offs[off]; run += v['sp']
-                    acc[ch][off].append([sid, (round(v['rto'], 2) if v['rto'] is not None else None),
-                                         round(v['sp']), round(v['gmv']), round(v['ord']), round(run), 1 if v['gmv'] > 0 else 0])
-        detail = {ch: {str(off): acc[ch][off] for off in acc[ch]} for ch in acc}
+            acc[ch][wk].append([sid,
+                                (round(fnum(r.get('rto_percentage')), 2) if r.get('rto_percentage') is not None else None),
+                                round(fnum(r.get('awb_nc'))), round(fnum(r.get('spend'))), round(fnum(r.get('gmv'))),
+                                1 if int(r.get('is_active') or 0) == 1 else 0])
+        detail = {ch: {str(wk): acc[ch][wk] for wk in acc[ch]} for ch in acc}
         if google_wk is None:
             google_wk = {'weeks': ['W%d' % i for i in range(11)], 'groups': []}
         google_wk['sellerDetail'] = detail
-        google_wk['detailCols'] = ['seller_id', 'rto_%', 'spend', 'gmv', 'orders', 'cum_spend', 'active']
-        print(f"[bev] card 11481 seller detail: benchmark offsets={len(detail['benchmark'])} cohort offsets={len(detail['cohort'])}")
+        google_wk['detailCols'] = ['seller_id', 'rto_%', 'awb_nc', 'spend', 'gmv', 'active']
+        print(f"[bev] 11576 seller detail: {len(det_rows)} rows · benchmark wks={len(detail['benchmark'])} cohort wks={len(detail['cohort'])}")
     except Exception as _e:
-        print(f"[bev] card 11481 failed ({_e}) -> reuse previous seller detail")
+        print(f"[bev] 11576 seller detail failed ({_e}) -> reuse previous seller detail")
         try:
             prev_gw = (load('bev_data.json').get('cards', {}) or {}).get('googleWk') or {}
             if google_wk is not None and prev_gw.get('sellerDetail'):
