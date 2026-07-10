@@ -901,20 +901,81 @@ def main():
     for _ym, _c in _h12.items():
         _r1, _r2 = _h1.get(_ym), _h2.get(_ym)
         _n1 = _r1['n'] if _r1 else 0; _n2 = _r2['n'] if _r2 else 0
+        # per-cohort fallback split ratio from cells that have both sub-values (original 10469)
+        _S1 = _S2 = 0.0
+        for _mc in ARR_MCOLS:
+            _a = _r1['cells']['both'].get(_mc) if _r1 else None
+            _b = _r2['cells']['both'].get(_mc) if _r2 else None
+            if _a is not None and _b is not None:
+                _S1 += _a * _n1; _S2 += _b * _n2
+        _r1fb = (_S1 / (_S1 + _S2)) if (_S1 + _S2) > 0 else ((_n1 / (_n1 + _n2)) if (_n1 + _n2) else 0.5)
         for _mc in ARR_MCOLS:
             _V = _c['cells']['both'].get(_mc)
             _s1 = (_r1['cells']['both'].get(_mc) * _n1) if (_r1 and _r1['cells']['both'].get(_mc) is not None) else None
             _s2 = (_r2['cells']['both'].get(_mc) * _n2) if (_r2 and _r2['cells']['both'].get(_mc) is not None) else None
             _tot = (_s1 or 0) + (_s2 or 0)
-            if _V is None or _tot <= 0:
-                if _s1 is None:
-                    _setc(_r1, _mc, None)
-                if _s2 is None:
-                    _setc(_r2, _mc, None)
-                continue
+            if _V is None:
+                _setc(_r1, _mc, None); _setc(_r2, _mc, None); continue
             _total = _V * (_n1 + _n2)
+            if _tot <= 0:
+                # combined present but no per-cell 10469 split -> use cohort fallback ratio (fills e.g. Feb M0)
+                _setc(_r1, _mc, round(_total * _r1fb / _n1) if _n1 else None)
+                _setc(_r2, _mc, round(_total * (1 - _r1fb) / _n2) if _n2 else None)
+                continue
             _setc(_r1, _mc, round(_total * (_s1 or 0) / _tot / _n1) if _n1 else None)
             _setc(_r2, _mc, round(_total * (_s2 or 0) / _tot / _n2) if _n2 else None)
+    # ---- ARR buckets: Top 20% / Mid 20% / Bottom 60% of sellers by weekly ARR (card 10469) ----
+    arr_buckets = {'weeks': [], 'variants': {}}
+    try:
+        _wk = defaultdict(lambda: defaultdict(lambda: [0.0, 0]))  # sid -> yw -> [sumARR, days]
+        for r in rows10469:
+            sid = str(r.get('seller_id') or '').strip()
+            if sid not in hit1_of:
+                continue
+            at = r.get('ARR_All__c')
+            if at is None:
+                continue
+            ds = str(r.get('date') or '')[:10]
+            if not ds or ds < '2026-02-01':
+                continue
+            _y, _w, _ = datetime.date.fromisoformat(ds).isocalendar()
+            cell = _wk[sid]['%d-W%02d' % (_y, _w)]; cell[0] += fnum(at); cell[1] += 1
+        seller_wk = defaultdict(dict); _weeks_set = set()
+        for sid, wm in _wk.items():
+            for yw, (s, dc) in wm.items():
+                if dc:
+                    seller_wk[sid][yw] = s / dc; _weeks_set.add(yw)
+        bweeks = sorted(_weeks_set, reverse=True)
+        def _bkt(pairs):
+            pairs = [p for p in pairs if p[2] > 0]; pairs.sort(key=lambda x: -x[2]); n = len(pairs)
+            if not n:
+                return None
+            t = round(n * 0.2); mid = round(n * 0.2)
+            top, midb, bot = pairs[:t], pairs[t:t + mid], pairs[t + mid:]
+            def _sm(g):
+                return {'n': len(g), 'total': round(sum(x[2] for x in g)), 'avg': round(sum(x[2] for x in g) / len(g)) if g else 0, 'rows': [[x[0], x[1], round(x[2])] for x in g]}
+            return {'top': _sm(top), 'mid': _sm(midb), 'bottom': _sm(bot)}
+        def _bv(member):
+            byw = {}
+            for yw in bweeks:
+                pr = [(sid, name_of.get(sid, ''), seller_wk[sid][yw]) for sid in seller_wk if yw in seller_wk[sid] and member(sid)]
+                b = _bkt(pr)
+                if b:
+                    byw[yw] = b
+            sp = []
+            for sid in seller_wk:
+                if not member(sid):
+                    continue
+                v = list(seller_wk[sid].values())
+                if v:
+                    sp.append((sid, name_of.get(sid, ''), sum(v) / len(v)))
+            return {'byWeek': byw, 'since': _bkt(sp)}
+        arr_buckets = {'weeks': bweeks, 'variants': {
+            'hit1': _bv(lambda s: not is_hit2_of.get(s)), 'hit2': _bv(lambda s: is_hit2_of.get(s)), 'hit12': _bv(lambda s: True)}}
+        print(f"[bev2] ARR buckets: {len(bweeks)} weeks")
+    except Exception as _e:
+        print(f"[bev2] ARR buckets failed: {_e}")
+
     # seller -> earliest hit2 achievement date (first of achievement month) for cumulative cohort
     hit2_ym = {}
     for x in hit2_detail:
@@ -1109,6 +1170,7 @@ def main():
         'hit2Cohort': hit2_cohort,
         'googleHitCohort': google_hit_cohort,
         'arrCohort': arr_cohort,
+        'arrBuckets': arr_buckets,
         'hit2ArrSpendMom': hit2_mom_perf,
         'hit2ArrSpendWow': hit2_wow_perf,
         'spends1k5k': spends_1k5k,
