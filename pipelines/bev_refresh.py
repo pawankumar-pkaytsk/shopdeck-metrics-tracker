@@ -15,6 +15,7 @@ Channel of a seller: meta = meta yest spend > ₹1; google = has a Google ad acc
 Run: cd ~/shopdeck-metrics-site && python3 ~/metabase-arr-refresh/bev_refresh.py --push
 """
 import json, os, sys, subprocess, urllib.request, urllib.parse, datetime, glob, re
+from collections import defaultdict, Counter
 
 
 def read_sheet_sa(sid, rng):
