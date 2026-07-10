@@ -242,6 +242,46 @@ def main():
         rec["byMonth"] = by_month
         out_gcs.append(rec)
 
+    # ---- Weekly snapshot (snapshot-forward): store this ISO week's per-GC metrics, accumulating ----
+    # History builds from when tracking started (stored in GitHub as lt_weekly.json).
+    ci = today.isocalendar()
+    cur_yw = "%d%02d" % (ci[0], ci[1])
+    cur_mo = today.strftime("%Y-%m")
+    def _wk_of(dstr):
+        try:
+            y, w, _ = datetime.date.fromisoformat(str(dstr)[:10]).isocalendar(); return "%d%02d" % (y, w)
+        except (ValueError, TypeError):
+            return None
+    weekly = load_json("lt_weekly.json", {"weeks": {}}) or {"weeks": {}}
+    weekly.setdefault("weeks", {})
+    snap = {}
+    for g in out_gcs:
+        if not g.get("matched") or not g.get("cur"):
+            continue
+        k = _key(g["name"]); c = g["cur"]; bm = g["byMonth"].get(cur_mo, {})
+        # this-week task / callback SLA
+        gts = [t for t in t_by_gc.get(k, []) if _wk_of(t.get("cr")) == cur_yw]
+        reg = [t for t in gts if str(t.get("ty") or "").lower() != "callback"]
+        cbs = [t for t in gts if str(t.get("ty") or "").lower() == "callback"]
+        def _sla(lst):
+            done = [t for t in lst if str(t.get("status") or "").lower() in ("completed", "closed")]
+            sla = sum(1 for t in done if t.get("tat") is not None and t.get("sla") is not None and t["tat"] <= t["sla"])
+            return {"tot": len(lst), "done": len(done), "sla": sla}
+        canon = gc_key.get(k); sids = [s["id"] for s in by_gc.get(canon, {}).get("sellers", [])] if canon else []
+        golw = sum(1 for sid in sids if _wk_of((golive.get(sid) or {}).get("g")) == cur_yw)
+        snap[g["empId"] or k] = {
+            "name": g["name"], "empId": g["empId"], "doj": g["doj"],
+            "assigned": c.get("assigned"), "live": c.get("live"), "spending": c.get("spending"),
+            "spendLivePct": c.get("spendLivePct"), "liveAssignedPct": c.get("liveAssignedPct"),
+            "bucketHealthPct": c.get("bucketHealthPct"),
+            "task": _sla(reg), "callback": _sla(cbs), "golives": golw,
+            "hitsTarget": bm.get("hitsTarget"), "hitsAch": bm.get("hitsAch", 0),
+        }
+    weekly["weeks"][cur_yw] = snap
+    weekly["generatedAt"] = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    json.dump(weekly, open(os.path.join(REPO, "lt_weekly.json"), "w"), separators=(",", ":"))
+    print(f"[lt] weekly snapshot {cur_yw}: {len(snap)} GCs · total weeks stored={len(weekly['weeks'])}")
+
     out = {
         "generatedAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "newSince": NEW_SINCE.isoformat(),
