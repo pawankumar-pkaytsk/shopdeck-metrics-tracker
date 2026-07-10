@@ -1,0 +1,64 @@
+name: GM Daily Output Compliance (8 AM)
+
+# Dedicated, isolated morning refresh for the "GM Daily Output Compliance" report
+# (Central Reports -> Core Team). Runs golive (card 7682) then GM compliance (card 2580 +
+# Validation sheet), so it stays fresh even if the big nightly refresh fails on another step.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '50 2 * * *'   # 08:20 IST (after the main nightly refresh starts)
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gm-daily
+  cancel-in-progress: false
+
+jobs:
+  gm-daily:
+    runs-on: ubuntu-latest
+    env:
+      METABASE_URL: ${{ secrets.METABASE_URL }}
+      METABASE_USER_EMAIL: ${{ secrets.METABASE_USER_EMAIL }}
+      METABASE_PASSWORD: ${{ secrets.METABASE_PASSWORD }}
+      REPO_DIR: ${{ github.workspace }}
+      GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install google-auth requests
+
+      - name: Golive overview (card 7682)
+        run: python pipelines/golive_refresh.py
+
+      - name: GM compliance (card 2580 + Validation sheet, depends on golive)
+        run: python pipelines/gm_compliance_refresh.py
+
+      - name: Commit & push refreshed data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add golive_data.json gm_compliance_data.json
+          if git diff --cached --quiet; then
+            echo "No data changes."
+          else
+            git commit -m "GM Daily Output refresh (golive + gm_compliance)"
+            git pull --rebase -X ours origin main
+            git push origin HEAD:main
+          fi
+
+      - name: Deploy frontend to Vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: team_Nv7Bqm9rCMXGjFA018pplRCW
+          VERCEL_PROJECT_ID: prj_YddUtFJTQvft3JUAArpDh9wsNr8l
+        run: npx --yes vercel@latest --prod --yes --token "$VERCEL_TOKEN"
