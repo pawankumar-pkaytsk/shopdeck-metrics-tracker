@@ -34,41 +34,59 @@ jobs:
         run: pip install google-auth requests
 
       - name: ARR (output)
+        continue-on-error: true
         run: python pipelines/output_refresh.py
       - name: Troubleshoot (ts + hitsMap)
+        continue-on-error: true
         run: python pipelines/ts_refresh.py
       - name: Task & Call compliance
+        continue-on-error: true
         run: python pipelines/task_refresh.py
       - name: Spend/Live (scaling + google T/S)
+        continue-on-error: true
         run: python pipelines/scaling_refresh.py
       - name: Bucket summary
+        continue-on-error: true
         run: python pipelines/bucket_refresh.py
       - name: Golive overview
+        continue-on-error: true
         run: python pipelines/golive_refresh.py
       - name: HIT 1
+        continue-on-error: true
         run: python pipelines/hit1_refresh.py
       - name: HIT 2
+        continue-on-error: true
         run: python pipelines/hit2_refresh.py
       - name: Hypercare sellers
+        continue-on-error: true
         run: python pipelines/hypercare_refresh.py
       - name: NPS
+        continue-on-error: true
         run: python pipelines/nps_refresh.py
       - name: Marketing Ops
+        continue-on-error: true
         run: python pipelines/markops_refresh.py
       - name: Bird Eye View (depends on the above)
+        continue-on-error: true
         run: python pipelines/bev_refresh.py
       - name: GM Compliance
+        continue-on-error: true
         run: python pipelines/gm_compliance_refresh.py
       - name: GC View (depends on golive/ts/scaling/hit1/task)
+        continue-on-error: true
         run: python pipelines/gc_view_refresh.py
       - name: L&T View (depends on gc/golive/task/hit1)
+        continue-on-error: true
         run: python pipelines/lt_refresh.py
       - name: Callback SLA adherence (card 11646)
+        continue-on-error: true
         run: python pipelines/callback_sla_refresh.py
       - name: Seller call records (card 9688, sharded)
+        continue-on-error: true
         run: python pipelines/calls_refresh.py
 
       - name: Snapshot (dated, compressed archive for time-travel)
+        continue-on-error: true
         run: python pipelines/snapshot.py
 
       - name: Commit & push refreshed data
