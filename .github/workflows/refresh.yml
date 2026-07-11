@@ -101,6 +101,7 @@ jobs:
             echo "No data changes."
           else
             git commit -m "Refresh data + daily snapshot"
+            git pull --rebase -X ours origin main
             git push origin HEAD:main
           fi
 
