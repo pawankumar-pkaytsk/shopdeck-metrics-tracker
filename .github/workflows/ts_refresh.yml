@@ -1,0 +1,66 @@
+name: Troubleshoot Compliance refresh (3-hourly)
+
+# Keeps Input Metrics -> Troubleshoot Compliance fresh without manual re-syncs.
+# Runs ts_refresh (card 2580 T/S dates + 10189 + eligibility) and scaling (google T/S),
+# commits, and deploys. Isolated + resilient so a transient card failure doesn't block it.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 */3 * * *'   # every 3 hours (UTC)
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ts-refresh
+  cancel-in-progress: false
+
+jobs:
+  ts-refresh:
+    runs-on: ubuntu-latest
+    env:
+      METABASE_URL: ${{ secrets.METABASE_URL }}
+      METABASE_USER_EMAIL: ${{ secrets.METABASE_USER_EMAIL }}
+      METABASE_PASSWORD: ${{ secrets.METABASE_PASSWORD }}
+      REPO_DIR: ${{ github.workspace }}
+      GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install google-auth requests
+
+      - name: Troubleshoot (ts + hitsMap, card 2580)
+        continue-on-error: true
+        run: python pipelines/ts_refresh.py
+
+      - name: Spend/Live (scaling + google T/S)
+        continue-on-error: true
+        run: python pipelines/scaling_refresh.py
+
+      - name: Commit & push refreshed data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ts_data.json scaling_data.json google_ts_data.json
+          if git diff --cached --quiet; then
+            echo "No data changes."
+          else
+            git commit -m "Troubleshoot 3-hourly refresh"
+            git pull --rebase -X ours origin main
+            git push origin HEAD:main
+          fi
+
+      - name: Deploy frontend to Vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: team_Nv7Bqm9rCMXGjFA018pplRCW
+          VERCEL_PROJECT_ID: prj_YddUtFJTQvft3JUAArpDh9wsNr8l
+        run: npx --yes vercel@latest --prod --yes --token "$VERCEL_TOKEN"
