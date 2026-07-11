@@ -58,6 +58,20 @@ def main():
         ts_events = v.get("ts", []) if isinstance(v, dict) else []
         gmc_by[_key(g)] = {"tsEligible": elig, "tsDone7": len(ts_events)}
 
+    # current ISO week (Mon..Sun) for "T/S done this week" gate
+    today = datetime.date.today()
+    mon = today - datetime.timedelta(days=today.weekday())
+    sun = mon + datetime.timedelta(days=6)
+    monS, sunS = mon.isoformat(), sun.isoformat()
+
+    def ts_flags(sid):
+        """(eligible, pending) — eligible = last-7d spend > 3540; pending = eligible & not T/S this week."""
+        t = ts_sellers.get(sid) or {}
+        elig = num(t.get("s7")) > SPEND_TS
+        d = str(t.get("d") or "")[:10]
+        done_this_week = bool(d and monS <= d <= sunS)
+        return elig, (elig and not done_this_week), t
+
     gm_gcs = defaultdict(list)
     for gc, gm in gc_gm.items():
         gm_gcs[gm].append(gc)
@@ -66,21 +80,30 @@ def main():
     for gm, gcs in gm_gcs.items():
         tot = {"assigned": 0, "live": 0, "spending": 0, "spend3k": 0, "hitsTarget": 0, "hitsAchieved": 0}
         gc_rows = []
-        elig_today = 0
+        elig_today = 0; pend_total = 0; pend_detail = []
         for gc in gcs:
             met = (by_gc.get(gc) or {}).get("metrics", {})
             for k in tot:
                 tot[k] += num(met.get(k))
             sids = [s["id"] for s in by_gc.get(gc, {}).get("sellers", [])]
-            e = sum(1 for sid in sids if num((ts_sellers.get(sid) or {}).get("s7")) > SPEND_TS)
-            elig_today += e
+            snames = {s["id"]: s.get("name", "") for s in by_gc.get(gc, {}).get("sellers", [])}
+            e = 0; p = 0
+            for sid in sids:
+                elig, pending, t = ts_flags(sid)
+                e += 1 if elig else 0
+                if pending:
+                    p += 1
+                    pend_detail.append({"s": sid, "n": snames.get(sid, ""), "gc": gc,
+                                        "s7": round(num(t.get("s7"))), "lastTS": (str(t.get("d") or "")[:10] or "—")})
+            elig_today += e; pend_total += p
             gc_rows.append({
                 "gc": gc, "assigned": met.get("assigned"), "live": met.get("live"),
                 "spending": met.get("spending"), "spendLivePct": met.get("spendLivePct"),
                 "liveAssignedPct": met.get("liveAssignedPct"), "spend3kLivePct": met.get("spend3kLivePct"),
                 "hitsTarget": met.get("hitsTarget"), "hitsAchieved": met.get("hitsAchieved"),
-                "tsEligible": e,
+                "tsEligible": e, "tsPending": p,
             })
+        pend_detail.sort(key=lambda x: -x["s7"])
         gc_rows.sort(key=lambda x: -(x.get("assigned") or 0))
         assigned, live, spending = tot["assigned"], tot["live"], tot["spending"]
         comp = gmc_by.get(_key(gm), {})
@@ -92,9 +115,11 @@ def main():
                 "liveAssignedPct": round(live / assigned * 100, 1) if assigned else None,
                 "hitsTarget": round(tot["hitsTarget"]), "hitsAchieved": round(tot["hitsAchieved"]),
                 "tsEligibleToday": elig_today,
+                "tsPending": pend_total,
                 "tsDone7": comp.get("tsDone7"),
             },
             "gcs": gc_rows,
+            "tsPendingDetail": pend_detail,
             "gcCount": len(gcs),
         }
 
