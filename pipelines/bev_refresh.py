@@ -1193,7 +1193,7 @@ def main():
         print(f"[bev2] NPS 1k-5k failed: {_e}")
 
     # ---- (16) ARR buckets Top 20 / Mid 60 / Bottom 20 for 1k-5k (yesterday ARR) ----
-    def arr_buckets(pairs):
+    def build_arr_buckets(pairs):   # renamed: 'arr_buckets' is the channel-buckets dict above
         pairs = [p for p in pairs if p[2] > 0]
         pairs.sort(key=lambda x: -x[2])
         n = len(pairs)
@@ -1206,7 +1206,7 @@ def main():
                     'rows': [[x[0], x[1], round(x[2])] for x in grp]}
         return [summ(top, 'Top 20%'), summ(mid, 'Mid 60%'), summ(bot, 'Bottom 20%')]
     arr_1k5k_pairs = [[r[0], seller_meta.get(r[0], {}).get('n', ''), r[5]] for r in perf_by_date.get(as_of, {}).get('rows', [])]
-    arr_buckets_1k5k = arr_buckets(arr_1k5k_pairs)
+    arr_buckets_1k5k = build_arr_buckets(arr_1k5k_pairs)
 
     # ---- Google 1k-5k: Bucket Health / Potentials / Objective (card 11011 + google channel) ----
     def google_bucket(pred, label):
@@ -1317,7 +1317,10 @@ def main():
         },
         'bev2': bev2,
     }
-    json.dump(out, open(OUT, 'w'), separators=(',', ':'))
+    # Serialize fully in-memory FIRST, then write — so a serialization error can never leave a
+    # truncated bev_data.json on disk (the previous valid file stays intact instead).
+    _payload = json.dumps(out, separators=(',', ':'))
+    open(OUT, 'w').write(_payload)
     print(f"[bev] as-of {as_of} · week {monS}..{sunS} · 1k-5k accounts={len(sids)} · HIT2 total={len(hit2_detail)}")
     print(f"  ARR meta={round(arr_meta):,} spend meta={round(spend_meta):,} · ARR google={round(arr_google):,} spend google={round(spend_google):,}")
     print(f"  Spend/Live meta={meta_sp}/{assigned}={fmtpct(sl_meta_pct)} · google={goog_sp}/{goog_live}={fmtpct(sl_google_pct)} · blended={blend_sp}/{assigned}={fmtpct(sl_blended_pct)}")
