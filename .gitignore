@@ -9,3 +9,6 @@ spendinputs.json
 daily_plan.json
 handover.json
 escalation.json
+
+.env.local
+.env*.local

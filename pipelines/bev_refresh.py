@@ -372,11 +372,78 @@ def main():
     months = sorted(set(hit2_tgt_m) | set(months_seen))[-6:]
     report_ym = (max(hit2_tgt_m) if hit2_tgt_m else (max(months) if months else ''))
 
+    # ---- shared card 10469 fetch (daily channel ARR) + freeze ARR at HIT2-conversion Friday ----
+    _c10469 = {}
+    def get10469():
+        if 'r' not in _c10469:
+            try:
+                _c10469['r'] = req(f"{url}/api/card/10469/query/json", 'POST', {}, H)
+            except Exception as _e:
+                print(f"[tva] card 10469 fetch failed: {_e}"); _c10469['r'] = []
+        return _c10469['r']
+
+    # HIT2 conversion Friday per seller (ISO week of hit2 -> that week's Friday)
+    conv_friday = {}
+    for r in hitrows:
+        if str(r.get('hit2')).strip() not in ('1', '1.0', 'True', 'true'):
+            continue
+        sid = str(r.get('seller_id') or '').strip()
+        yw = str(r.get('hit2_year_week') or '').strip()
+        if not sid or len(yw) < 6:
+            continue
+        try:
+            fri = datetime.date.fromisocalendar(int(yw[:4]), int(yw[4:6]), 5)  # Friday of that ISO week
+            conv_friday[sid] = fri.isoformat()
+        except (ValueError, TypeError):
+            continue
+    # frozen ARR = latest daily ARR_All (card 10469) on/before that seller's conversion Friday
+    frozen_arr = {}
+    for r in get10469():
+        sid = str(r.get('seller_id') or '').strip()
+        fri = conv_friday.get(sid)
+        if not fri:
+            continue
+        at = r.get('ARR_All__c')
+        if at is None:
+            continue
+        ds = str(r.get('date') or '')[:10]
+        if ds and ds <= fri and (sid not in frozen_arr or ds > frozen_arr[sid][0]):
+            frozen_arr[sid] = (ds, fnum(at))
+    frozen_arr = {sid: round(v[1]) for sid, v in frozen_arr.items()}
+    print(f"[tva] frozen ARR at conversion Friday for {len(frozen_arr)} HIT2 sellers")
+
+    # ---- per-GL Google qualifiers (1k-5k accounts / live-google / google-spending), from scaling ----
+    _ceil = lambda x: int(x) + (1 if x > int(x) else 0)
+    gl_goog = {}
+    for sid in sids:
+        gl = smap.get(sid, {}).get('gc', 'Unassigned')
+        if gl not in gls:
+            continue
+        t = rec(sid); d = gl_goog.setdefault(gl, {'acc': 0, 'glive': 0, 'gspend': 0})
+        d['acc'] += 1
+        if str(t.get('ga') or '') and fnum(t.get('gt')) > 1:
+            d['glive'] += 1
+        if fnum(t.get('gy')) > 50:
+            d['gspend'] += 1
+
+    def goog_fields(acc, glive, gspend):
+        golive_ok = acc > 0 and (glive / acc) >= 0.5
+        sl_ok = glive > 0 and (gspend / glive) >= 0.6
+        return {
+            'gAcc': acc, 'gLive': glive, 'gSpend': gspend,
+            'gGoliveQual': golive_ok, 'gGolivePct': round(glive / acc * 100, 1) if acc else None,
+            'gGoliveDelta': max(0, _ceil(0.5 * acc) - glive),
+            'gSLQual': sl_ok, 'gSLPct': round(gspend / glive * 100, 1) if glive else None,
+            'gSLDelta': max(0, _ceil(0.6 * glive) - gspend),
+        }
+
     def compute_tva(ym):
         ry, rm = int(ym[:4]), int(ym[4:])
         arrT, arrA, det = {}, {}, {}
         for sid, cym in cohort_sellers.items():
-            arr = arr_by_sm.get((sid, ym))
+            arr = frozen_arr.get(sid)   # HIT2 sellers: ARR frozen at their conversion Friday
+            if arr is None:
+                arr = arr_by_sm.get((sid, ym))
             if arr is None:
                 continue
             age = (ry - int(cym[:4])) * 12 + (rm - int(cym[4:]))
@@ -409,13 +476,21 @@ def main():
 
         def mkrow(name, aT, aA, h2t_v, h2a_v, nrec):
             aT, aA = round(aT), round(aA)
+            # qualified = HIT2 achieved >= HIT2 target AND ARR achieved >= 85% of ARR target
+            hit2_ok = (h2t_v is not None) and (h2a_v >= h2t_v)
+            arr_ok = (aT > 0) and (aA >= 0.85 * aT)
             return {'name': name, 'hit2T': h2t_v, 'hit2A': h2a_v, 'arrT': aT, 'arrA': aA,
-                    'delta': max(0, round(0.85 * aT - aA)), 'n': nrec}
+                    'delta': max(0, round(0.85 * aT - aA)), 'n': nrec,
+                    'hit2Ok': hit2_ok, 'arrOk': arr_ok, 'qualified': hit2_ok and arr_ok}
         gl_rows = [mkrow(g, arrT.get(g, 0), arrA.get(g, 0), h2t.get(g), h2A.get(g, 0), len(det.get(g, []))) for g in gls]
+        for row in gl_rows:
+            gg = gl_goog.get(row['name'], {'acc': 0, 'glive': 0, 'gspend': 0})
+            row.update(goog_fields(gg['acc'], gg['glive'], gg['gspend']))
         gl_detail = {g: sorted(det.get(g, []), key=lambda x: -x['arr']) for g in gls}
         gl_hit2 = {g: h2det.get(g, []) for g in gls}
         # GM rollup
         gT, gA, gh2T, gh2A, gdet, ghit2 = {}, {}, {}, {}, {}, {}
+        gGoog = {}
         for g in gls:
             gm = gc2gm_all.get(g) or 'Unassigned'
             if gm == 'Unassigned':
@@ -426,8 +501,14 @@ def main():
             gh2T[gm] = gh2T.get(gm, 0) + (h2t.get(g) or 0)
             gdet.setdefault(gm, []).extend(det.get(g, []))
             ghit2.setdefault(gm, []).extend(h2det.get(g, []))
+            gg = gl_goog.get(g, {'acc': 0, 'glive': 0, 'gspend': 0})
+            acc = gGoog.setdefault(gm, {'acc': 0, 'glive': 0, 'gspend': 0})
+            acc['acc'] += gg['acc']; acc['glive'] += gg['glive']; acc['gspend'] += gg['gspend']
         gms = sorted(gT)
         gm_rows = [mkrow(gm, gT.get(gm, 0), gA.get(gm, 0), gh2T.get(gm) or None, gh2A.get(gm, 0), len(gdet.get(gm, []))) for gm in gms]
+        for row in gm_rows:
+            gg = gGoog.get(row['name'], {'acc': 0, 'glive': 0, 'gspend': 0})
+            row.update(goog_fields(gg['acc'], gg['glive'], gg['gspend']))
         gm_detail = {gm: sorted(gdet.get(gm, []), key=lambda x: -x['arr']) for gm in gms}
         gm_hit2 = {gm: ghit2.get(gm, []) for gm in gms}
         return {'byGL': {'rows': gl_rows, 'detail': gl_detail, 'hit2': gl_hit2},
@@ -799,7 +880,7 @@ def main():
     smon = {}  # sid -> monthKey(int YYYYMM) -> {'m':sum,'g':sum,'t':sum,'d':days}
     arr_window = {'from': '', 'to': ''}
     try:
-        rows10469 = req(f"{url}/api/card/10469/query/json", 'POST', {}, H)
+        rows10469 = get10469()   # reuse the single shared fetch from the TvA block
         ad = []
         for r in rows10469:
             sid = str(r.get('seller_id') or '').strip()
