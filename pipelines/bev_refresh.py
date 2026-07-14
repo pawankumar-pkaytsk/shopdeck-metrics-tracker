@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build bev_data.json for "Pratiksha's Bird Eye View" (1k-5k team lead overview).
 
-Channel-split ARR/spend come from card 10892 (spend_meta/spend_google/arr_meta/arr_google
-per seller per day). Everything else is read from the SAME local JSON snapshots the other
+Channel-split ARR/spend come from card 10469 (spend_meta/spend_google/arr_meta/arr_google/
+arr_overall per seller per day, last 6 months). Everything else is read from the SAME local JSON snapshots the other
 tabs render, so the numbers reconcile exactly:
   - scaling_data.json   -> Spend/Live (meta/google/blended)        (== Central Reports 1k-5k)
   - ts_data.json        -> Troubleshoot Compliance (meta)          (current week)
@@ -35,7 +35,7 @@ def read_sheet_sa(sid, rng):
     u = f"https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/{urllib.parse.quote(rng)}"
     return json.loads(urllib.request.urlopen(urllib.request.Request(u, headers={'Authorization': 'Bearer ' + cred.token}), timeout=120).read()).get('values', [])
 
-ARR_CARD = 10892
+ARR_CARD = 10469  # day-wise seller-wise spend + ARR (Meta/Google/overall), last 6 months, all sellers
 HIT_CARD = 10453
 COHORT_CARD = 11020  # hit1 seller-monthwise ARR cohort (hit_year_month x M0..M6, incl TARGET row)
 COHORT_ARR_CARD = 7336  # sellerwise-monthwise ARR — seller-level, for per-cell drilldown + GM/GL split
@@ -87,6 +87,17 @@ def main():
     tok = req(url + "/api/session", 'POST', {"username": email, "password": pw}, {'Content-Type': 'application/json'})['id']
     H = {'Content-Type': 'application/json', 'X-Metabase-Session': tok}
 
+    # single cached fetch of the ARR card (10469) — reused by the channel-split block,
+    # the frozen-ARR (TvA) block, and the ARR-cohort block below.
+    _c10469 = {}
+    def get10469():
+        if 'r' not in _c10469:
+            try:
+                _c10469['r'] = req(f"{url}/api/card/{ARR_CARD}/query/json", 'POST', {}, H)
+            except Exception as _e:
+                print(f"[arr] card {ARR_CARD} fetch failed: {_e}"); _c10469['r'] = []
+        return _c10469['r']
+
     ts = load('ts_data.json')
     scaling = load('scaling_data.json')
     gts = load('google_ts_data.json')
@@ -101,8 +112,8 @@ def main():
     def rec(sid):
         return sc.get(sid, {})
 
-    # ---- channel-split ARR + spend (card 10892), yesterday = latest date present ----
-    arr = req(f"{url}/api/card/{ARR_CARD}/query/json", 'POST', {}, H)
+    # ---- channel-split ARR + spend (card 10469), yesterday = latest date present ----
+    arr = get10469()
     by_date = {}
     for r in arr:
         d = str(r.get('date') or '')[:10]
@@ -372,16 +383,7 @@ def main():
     months = sorted(set(hit2_tgt_m) | set(months_seen))[-6:]
     report_ym = (max(hit2_tgt_m) if hit2_tgt_m else (max(months) if months else ''))
 
-    # ---- shared card 10469 fetch (daily channel ARR) + freeze ARR at HIT2-conversion Friday ----
-    _c10469 = {}
-    def get10469():
-        if 'r' not in _c10469:
-            try:
-                _c10469['r'] = req(f"{url}/api/card/10469/query/json", 'POST', {}, H)
-            except Exception as _e:
-                print(f"[tva] card 10469 fetch failed: {_e}"); _c10469['r'] = []
-        return _c10469['r']
-
+    # ---- freeze ARR at HIT2-conversion Friday (uses the shared card-10469 fetch) ----
     # HIT2 conversion Friday per seller (ISO week of hit2 -> that week's Friday)
     conv_friday = {}
     for r in hitrows:
@@ -403,7 +405,7 @@ def main():
         fri = conv_friday.get(sid)
         if not fri:
             continue
-        at = r.get('ARR_All__c')
+        at = r.get('arr_overall')
         if at is None:
             continue
         ds = str(r.get('date') or '')[:10]
@@ -886,7 +888,7 @@ def main():
             sid = str(r.get('seller_id') or '').strip()
             if sid not in hit1_of:
                 continue
-            am, ag, at = r.get('ARR__Meta__c'), r.get('ARR__Google__c'), r.get('ARR_All__c')
+            am, ag, at = r.get('arr_meta'), r.get('arr_google'), r.get('arr_overall')
             if am is None and ag is None and at is None:
                 continue
             ds = str(r.get('date') or '')[:10]
