@@ -40,8 +40,18 @@ def req(url, method='GET', body=None, H=None):
 
 def main():
     url, email, pw = creds()
-    tok = req(url + "/api/session", 'POST', {"username": email, "password": pw}, {'Content-Type': 'application/json'})['id']
-    H = {'Content-Type': 'application/json', 'X-Metabase-Session': tok}
+    _mbkey = os.environ.get('METABASE_API_KEY')
+    if not _mbkey:
+        try:
+            _mbkey = json.load(open(os.path.expanduser('~/metabase-arr-refresh/.mbcreds'))).get('METABASE_API_KEY')
+        except Exception:
+            _mbkey = None
+    if _mbkey:
+        AUTH = {'x-api-key': _mbkey}
+    else:
+        tok = req(url + "/api/session", 'POST', {"username": email, "password": pw}, {'Content-Type': 'application/json'})['id']
+        AUTH = {'X-Metabase-Session': tok}
+    H = {'Content-Type': 'application/json', **AUTH}
     rows = req(f"{url}/api/card/{CARD}/query/json", 'POST', {}, H)
     print(f"[golive] card {CARD}: {len(rows)} rows")
 

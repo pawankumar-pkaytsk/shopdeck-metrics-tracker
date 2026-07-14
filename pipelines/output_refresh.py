@@ -64,9 +64,18 @@ def num(v):
 
 def main():
     url, email, pw = creds()
-    tok = req(url + "/api/session", 'POST', {"username": email, "password": pw},
-              {'Content-Type': 'application/json'})['id']
-    H = {'Content-Type': 'application/json', 'X-Metabase-Session': tok}
+    _mbkey = os.environ.get('METABASE_API_KEY')
+    if not _mbkey:
+        try:
+            _mbkey = json.load(open(os.path.expanduser('~/metabase-arr-refresh/.mbcreds'))).get('METABASE_API_KEY')
+        except Exception:
+            _mbkey = None
+    if _mbkey:
+        AUTH = {'x-api-key': _mbkey}
+    else:
+        tok = req(url + "/api/session", 'POST', {"username": email, "password": pw}, {'Content-Type': 'application/json'})['id']
+        AUTH = {'X-Metabase-Session': tok}
+    H = {'Content-Type': 'application/json', **AUTH}
 
     # HITS 1k-5k population + seller names (card 10469 has no name column)
     ts_path = os.path.join(REPO, 'ts_data.json')

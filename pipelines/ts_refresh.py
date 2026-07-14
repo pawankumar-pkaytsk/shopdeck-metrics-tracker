@@ -54,9 +54,18 @@ def num(v):
 
 def main():
     url, email, pw = creds()
-    tok = req(url + "/api/session", 'POST', {"username": email, "password": pw},
-              {'Content-Type': 'application/json'})['id']
-    H = {'Content-Type': 'application/json', 'X-Metabase-Session': tok}
+    _mbkey = os.environ.get('METABASE_API_KEY')
+    if not _mbkey:
+        try:
+            _mbkey = json.load(open(os.path.expanduser('~/metabase-arr-refresh/.mbcreds'))).get('METABASE_API_KEY')
+        except Exception:
+            _mbkey = None
+    if _mbkey:
+        AUTH = {'x-api-key': _mbkey}
+    else:
+        tok = req(url + "/api/session", 'POST', {"username": email, "password": pw}, {'Content-Type': 'application/json'})['id']
+        AUTH = {'X-Metabase-Session': tok}
+    H = {'Content-Type': 'application/json', **AUTH}
 
     rows = req(f"{url}/api/card/{CARD}/query/json", 'POST', {}, H)
     print(f"[ts] card {CARD}: {len(rows)} rows")
@@ -89,7 +98,7 @@ def main():
                      "GROUP BY seller_id")
         body = urllib.parse.urlencode({"query": json.dumps({"database": 6, "type": "native", "native": {"query": spend_sql}})}).encode()
         spreq = urllib.request.Request(url + "/api/dataset/json", data=body, method='POST',
-                                       headers={'X-Metabase-Session': tok, 'Content-Type': 'application/x-www-form-urlencoded'})
+                                       headers={**AUTH, 'Content-Type': 'application/x-www-form-urlencoded'})
         spend_rows = json.loads(urllib.request.urlopen(spreq, timeout=300).read())
         added = 0
         for r in spend_rows:
@@ -151,7 +160,7 @@ def main():
                   "FROM ranked WHERE rn = 1 AND team = 'HITS'")
     cbody = urllib.parse.urlencode({"query": json.dumps({"database": 6, "type": "native", "native": {"query": cohort_sql}})}).encode()
     creq = urllib.request.Request(url + "/api/dataset/json", data=cbody, method='POST',
-                                  headers={'X-Metabase-Session': tok, 'Content-Type': 'application/x-www-form-urlencoded'})
+                                  headers={**AUTH, 'Content-Type': 'application/x-www-form-urlencoded'})
     cohort = json.loads(urllib.request.urlopen(creq, timeout=300).read())
 
     m7753 = {}

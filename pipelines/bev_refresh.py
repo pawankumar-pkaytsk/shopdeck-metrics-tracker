@@ -84,8 +84,18 @@ def load(name):
 
 def main():
     url, email, pw = creds()
-    tok = req(url + "/api/session", 'POST', {"username": email, "password": pw}, {'Content-Type': 'application/json'})['id']
-    H = {'Content-Type': 'application/json', 'X-Metabase-Session': tok}
+    _mbkey = os.environ.get('METABASE_API_KEY')
+    if not _mbkey:
+        try:
+            _mbkey = json.load(open(os.path.expanduser('~/metabase-arr-refresh/.mbcreds'))).get('METABASE_API_KEY')
+        except Exception:
+            _mbkey = None
+    if _mbkey:
+        AUTH = {'x-api-key': _mbkey}
+    else:
+        tok = req(url + "/api/session", 'POST', {"username": email, "password": pw}, {'Content-Type': 'application/json'})['id']
+        AUTH = {'X-Metabase-Session': tok}
+    H = {'Content-Type': 'application/json', **AUTH}
 
     # single cached fetch of the ARR card (10469) — reused by the channel-split block,
     # the frozen-ARR (TvA) block, and the ARR-cohort block below.
@@ -663,7 +673,7 @@ def main():
         _dq = {'database': c76['dataset_query'].get('database', 6), 'type': 'native', 'native': {'query': _base + _sel, 'template-tags': _tt}}
         _payload = urllib.parse.urlencode({'query': json.dumps(_dq)}).encode()
         _dreq = urllib.request.Request(f"{url}/api/dataset/json", data=_payload, method='POST',
-                                       headers={'X-Metabase-Session': tok, 'Content-Type': 'application/x-www-form-urlencoded'})
+                                       headers={**AUTH, 'Content-Type': 'application/x-www-form-urlencoded'})
         det_rows = json.loads(urllib.request.urlopen(_dreq, timeout=600).read())
         acc = {'benchmark': defaultdict(list), 'cohort': defaultdict(list)}
         for r in det_rows:
