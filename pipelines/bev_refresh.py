@@ -610,15 +610,16 @@ def main():
             cnt = sum(len(churned_tva_by_gl.get(g, [])) for g in gls if gc2gm_all.get(g) == row['name'])
             row['churn'] = cnt
 
-    # Weekly 1k-5k metrics (card 11115) for the table under ARR Cohort (1k-5k)
-    weekly_1k5k = []
-    try:
-        _w = req(f"{url}/api/card/11115/query/json", 'POST', {}, H)
-        def _wnum(v):
-            try: return round(float(v), 2)
-            except (TypeError, ValueError): return None
-        for _r in sorted(_w, key=lambda x: -(int(x.get('year_week') or 0))):
-            weekly_1k5k.append({
+    # Weekly 1k-5k metrics for the table under ARR Cohort (1k-5k): HIT1 / HIT2 / HIT1+HIT2 toggle.
+    # HIT1 = card 11115, HIT2 = card 11727, HIT1+HIT2 = card 11740 (identical column schema).
+    def _wnum(v):
+        try: return round(float(v), 2)
+        except (TypeError, ValueError): return None
+    def _weekly_rows(cid):
+        out = []
+        for _r in sorted(req(f"{url}/api/card/{cid}/query/json", 'POST', {}, H),
+                         key=lambda x: -(int(x.get('year_week') or 0))):
+            out.append({
                 'yw': str(_r.get('year_week') or ''),
                 'total': _r.get('total'),
                 'running': _r.get('running'),
@@ -632,9 +633,15 @@ def main():
                 'arrBhPct': _wnum(_r.get('arr_bh_pct')),
                 'arrBeBhPct': _wnum(_r.get('arr_be_bh_pct')),
             })
-        print(f"[bev] weekly 1k-5k (card 11115): {len(weekly_1k5k)} weeks")
-    except Exception as _e:
-        print(f"[bev] card 11115 failed: {_e}")
+        return out
+    weekly_by_hit = {'hit1': [], 'hit2': [], 'both': []}
+    for _kk, _cid in (('hit1', 11115), ('hit2', 11727), ('both', 11740)):
+        try:
+            weekly_by_hit[_kk] = _weekly_rows(_cid)
+            print(f"[bev] weekly 1k-5k {_kk} (card {_cid}): {len(weekly_by_hit[_kk])} weeks")
+        except Exception as _e:
+            print(f"[bev] weekly 1k-5k {_kk} (card {_cid}) failed: {_e}")
+    weekly_1k5k = weekly_by_hit['hit1']  # backward-compat (default view)
 
     # Google Metrics Benchmarking (card 11576): metric-wise rows, columns W0..W10.
     # 4 groups of 4 metrics for grouped line charts + adjacent numbers.
@@ -1289,6 +1296,7 @@ def main():
             'hit2':        {'value': len(hit2_detail), 'detail': hit2_detail},
             'cohort':      cohort,
             'weekly1k5k':  weekly_1k5k,
+            'weeklyByHit': weekly_by_hit,
             'googleWk':    google_wk,
             'churn':       churn,
             'arr_meta':    {'value': round(arr_meta), 'detail': arr_meta_detail},
