@@ -1276,7 +1276,7 @@ def main():
     # is identified by hit_year_week being populated (HIT1'd); rows without it = Revenue.
     # churn month = calendar month of (last_spend_week + 21 days); age = months(golive .. last_spend).
     # Only churn_flag == 1, and only the last 6 calendar months of churn.
-    churn_cmp = {'months': [], 'maxAge': 12, 'rows': {'HIT': [], 'REVENUE': []}}
+    churn_cmp = {'months': [], 'maxAge': 12, 'rows': {'HIT': [], 'REVENUE': []}, 'totals': {'HIT': 0, 'REVENUE': 0}}
     try:
         def _yw_mon(yw):
             s = str(yw); return datetime.date.fromisocalendar(int(s[:4]), int(s[4:6]), 1)
@@ -1287,6 +1287,9 @@ def main():
         _crows = req(f"{url}/api/card/11771/query/json", 'POST', {}, H)
         _cmonths = set()
         for _r in _crows:
+            # per-team base (denominator for the % view) = all sellers of that team, both flags
+            _tm0 = 'HIT' if _r.get('hit_year_week') is not None else 'REVENUE'
+            churn_cmp['totals'][_tm0] += 1
             if _r.get('churn_flag') != 1:
                 continue
             gl, ls = _r.get('go_live_week'), _r.get('last_spend_week')
