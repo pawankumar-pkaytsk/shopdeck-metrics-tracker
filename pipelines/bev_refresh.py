@@ -1271,38 +1271,44 @@ def main():
         sl_history.append({'d': today.isoformat(), 'meta': sl_meta_pct, 'google': sl_google_pct, 'blended': sl_blended_pct})
     print(f"[bev2] spend/live history: {len(sl_history)} points ({sl_history[0]['d'] if sl_history else '-'}..{sl_history[-1]['d'] if sl_history else '-'})")
 
-    # ---- (17) Churn comparison HITS vs Revenue (card 4118): MoM churn month x age M0..M12 ----
+    # ---- (17) Churn comparison HITS vs Revenue (card 11771): MoM churn month x age M0..M12 ----
+    # Card 11771 = 1k-5k + revenue sellers. team_mapping is unusable (~all REVENUE), so 1k-5k (HITS)
+    # is identified by hit_year_week being populated (HIT1'd); rows without it = Revenue.
     # churn month = calendar month of (last_spend_week + 21 days); age = months(golive .. last_spend).
-    # Only churn_flag == 1. team_mapping HIT -> HITS, REVENUE -> Revenue.
+    # Only churn_flag == 1, and only the last 6 calendar months of churn.
     churn_cmp = {'months': [], 'maxAge': 12, 'rows': {'HIT': [], 'REVENUE': []}}
     try:
         def _yw_mon(yw):
             s = str(yw); return datetime.date.fromisocalendar(int(s[:4]), int(s[4:6]), 1)
-        _crows = req(f"{url}/api/card/4118/query/json", 'POST', {}, H)
+        _cy, _cmm = today.year, today.month - 5   # 6-month window incl. current month
+        while _cmm <= 0:
+            _cmm += 12; _cy -= 1
+        _churn_cutoff = '%04d-%02d' % (_cy, _cmm)
+        _crows = req(f"{url}/api/card/11771/query/json", 'POST', {}, H)
         _cmonths = set()
         for _r in _crows:
             if _r.get('churn_flag') != 1:
                 continue
-            team = str(_r.get('team_mapping') or '').strip().upper()
             gl, ls = _r.get('go_live_week'), _r.get('last_spend_week')
-            if team not in ('HIT', 'REVENUE') or not gl or not ls:
+            if not gl or not ls:
                 continue
+            team = 'HIT' if _r.get('hit_year_week') is not None else 'REVENUE'   # 1k-5k = HIT1'd
             try:
                 g = _yw_mon(gl); l = _yw_mon(ls)
                 cm = (l + datetime.timedelta(days=21)).strftime('%Y-%m')
                 age = (l.year - g.year) * 12 + (l.month - g.month)
             except (ValueError, TypeError):
                 continue
-            if age < 0:
-                continue  # data noise: golive week after last-spend week
+            if age < 0 or cm < _churn_cutoff:   # skip noise + anything older than last 6 months
+                continue
             sid = str(_r.get('seller_id') or '')
             churn_cmp['rows'][team].append([sid, _r.get('icp_score'), cm, age, name_by_s.get(sid, '')])
             _cmonths.add(cm)
         churn_cmp['months'] = sorted(_cmonths)
-        print(f"[bev2] churn cmp (card 4118): HIT={len(churn_cmp['rows']['HIT'])} "
+        print(f"[bev2] churn cmp (card 11771, last 6mo >= {_churn_cutoff}): HIT={len(churn_cmp['rows']['HIT'])} "
               f"REVENUE={len(churn_cmp['rows']['REVENUE'])} · {len(_cmonths)} churn months")
     except Exception as _e:
-        print(f"[bev2] card 4118 churn cmp failed: {_e}")
+        print(f"[bev2] card 11771 churn cmp failed: {_e}")
 
     # ---- (18) Platform-level 1k-5k weekly metrics (card 11746): RTO / GMV / cancel / COGS / AOV ... ----
     platform_wk = []
