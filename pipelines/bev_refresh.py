@@ -138,9 +138,16 @@ def main():
     # day isn't over). "Yesterday" must be the calendar day before today.
     todayS = datetime.date.today().isoformat()
     all_dates = sorted(by_date)
-    good_dates = [d for d in all_dates if d < todayS]
+    # Only keep SETTLED days: the most recent days often have ARR trickling in while spend/Google
+    # aren't booked yet (spend = 0), which shows empty cards. A settled day = spend actually booked
+    # (meta+google spend over 1k-5k sellers > 0). This keeps "Yesterday", "Day before", "Last 7d"
+    # etc. all consistent on real days. Fall back to raw pre-today dates if none look settled.
+    def _day_spend(d):
+        return sum(fnum(r.get('spend_meta')) + fnum(r.get('spend_google'))
+                   for r in by_date.get(d, []) if str(r.get('seller_id') or '').strip() in sids)
+    good_dates = [d for d in all_dates if d < todayS and _day_spend(d) > 0]
     if not good_dates:
-        good_dates = all_dates
+        good_dates = [d for d in all_dates if d < todayS] or all_dates
     as_of = good_dates[-1] if good_dates else ''
     yrows = [r for r in by_date.get(as_of, []) if str(r.get('seller_id') or '').strip() in sids]
 
