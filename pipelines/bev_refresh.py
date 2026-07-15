@@ -1033,7 +1033,7 @@ def main():
             sid = str(r.get('seller_id') or '').strip()
             if sid not in hit1_of:
                 continue
-            at = r.get('ARR_All__c')
+            at = r.get('arr_overall')
             if at is None:
                 continue
             ds = str(r.get('date') or '')[:10]
