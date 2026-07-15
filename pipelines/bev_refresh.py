@@ -1312,6 +1312,7 @@ def main():
         'd7Paused': {'value': len(d7_paused), 'detail': d7_paused},
         'nps1k5k': nps_1k5k,
         'arrBuckets1k5k': arr_buckets_1k5k,
+        'churnCmp': churn_cmp,
         'google': {
             'bucketHealth': g_bucket_health, 'potentials': g_potentials, 'objective': g_objective,
             'spendMom': google_spend_mom, 'spendWow': google_spend_wow,
@@ -1330,7 +1331,6 @@ def main():
             'cohort':      cohort,
             'weekly1k5k':  weekly_1k5k,
             'weeklyByHit': weekly_by_hit,
-            'churnCmp':    churn_cmp,
             'googleWk':    google_wk,
             'churn':       churn,
             'arr_meta':    {'value': round(arr_meta), 'detail': arr_meta_detail},
