@@ -1264,6 +1264,39 @@ def main():
         sl_history.append({'d': today.isoformat(), 'meta': sl_meta_pct, 'google': sl_google_pct, 'blended': sl_blended_pct})
     print(f"[bev2] spend/live history: {len(sl_history)} points ({sl_history[0]['d'] if sl_history else '-'}..{sl_history[-1]['d'] if sl_history else '-'})")
 
+    # ---- (17) Churn comparison HITS vs Revenue (card 4118): MoM churn month x age M0..M12 ----
+    # churn month = calendar month of (last_spend_week + 21 days); age = months(golive .. last_spend).
+    # Only churn_flag == 1. team_mapping HIT -> HITS, REVENUE -> Revenue.
+    churn_cmp = {'months': [], 'maxAge': 12, 'rows': {'HIT': [], 'REVENUE': []}}
+    try:
+        def _yw_mon(yw):
+            s = str(yw); return datetime.date.fromisocalendar(int(s[:4]), int(s[4:6]), 1)
+        _crows = req(f"{url}/api/card/4118/query/json", 'POST', {}, H)
+        _cmonths = set()
+        for _r in _crows:
+            if _r.get('churn_flag') != 1:
+                continue
+            team = str(_r.get('team_mapping') or '').strip().upper()
+            gl, ls = _r.get('go_live_week'), _r.get('last_spend_week')
+            if team not in ('HIT', 'REVENUE') or not gl or not ls:
+                continue
+            try:
+                g = _yw_mon(gl); l = _yw_mon(ls)
+                cm = (l + datetime.timedelta(days=21)).strftime('%Y-%m')
+                age = (l.year - g.year) * 12 + (l.month - g.month)
+            except (ValueError, TypeError):
+                continue
+            if age < 0:
+                continue  # data noise: golive week after last-spend week
+            sid = str(_r.get('seller_id') or '')
+            churn_cmp['rows'][team].append([sid, _r.get('icp_score'), cm, age, name_by_s.get(sid, '')])
+            _cmonths.add(cm)
+        churn_cmp['months'] = sorted(_cmonths)
+        print(f"[bev2] churn cmp (card 4118): HIT={len(churn_cmp['rows']['HIT'])} "
+              f"REVENUE={len(churn_cmp['rows']['REVENUE'])} · {len(_cmonths)} churn months")
+    except Exception as _e:
+        print(f"[bev2] card 4118 churn cmp failed: {_e}")
+
     bev2 = {
         'window': {'from': good_dates[0] if good_dates else '', 'to': as_of},
         'slHistory': sl_history,
@@ -1297,6 +1330,7 @@ def main():
             'cohort':      cohort,
             'weekly1k5k':  weekly_1k5k,
             'weeklyByHit': weekly_by_hit,
+            'churnCmp':    churn_cmp,
             'googleWk':    google_wk,
             'churn':       churn,
             'arr_meta':    {'value': round(arr_meta), 'detail': arr_meta_detail},
