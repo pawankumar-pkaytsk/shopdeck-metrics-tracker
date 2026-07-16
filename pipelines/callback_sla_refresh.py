@@ -62,6 +62,29 @@ def main():
     json.dump(out, open(OUT, "w"), separators=(",", ":"))
     print(f"[callback-sla] card {CARD}: {len(out_rows)} days -> {OUT}")
 
+    # GC-wise callback SLA adherence (card 11230): D0 (same day) / D1 (yesterday) / L30 (last 30d),
+    # with D1 slot-wise breakdown. Powers Leadership -> All Reports -> 11. Callback Adherence.
+    GC_CARD = 11230
+    GC_OUT = os.path.join(REPO, "callback_gc_data.json")
+    def _n(v):
+        try: return round(float(v), 2)
+        except (TypeError, ValueError): return None
+    grows = req(f"{url}/api/card/{GC_CARD}/query/json", "POST", {}, H)
+    gc_rows = []
+    for r in grows:
+        gc_rows.append({
+            "gc": r.get("gc_name"),
+            "d0": {"tasks": r.get("d0_calling_tasks"), "within": r.get("d0_calls_within_sla"), "pct": _n(r.get("d0_sla_pct"))},
+            "d1": {"tasks": r.get("d1_calling_tasks"), "within": r.get("d1_calls_within_sla"), "pct": _n(r.get("d1_sla_pct")),
+                   "slot1": {"tasks": r.get("d1_slot1_tasks"), "pct": _n(r.get("d1_slot1_sla_pct"))},
+                   "slot2": {"tasks": r.get("d1_slot2_tasks"), "pct": _n(r.get("d1_slot2_sla_pct"))}},
+            "l30": {"tasks": r.get("l30_calling_tasks"), "within": r.get("l30_calls_within_sla"), "pct": _n(r.get("l30_sla_pct"))},
+        })
+    gc_rows.sort(key=lambda x: (x["gc"] or ""))
+    json.dump({"generatedAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "rows": gc_rows},
+              open(GC_OUT, "w"), separators=(",", ":"))
+    print(f"[callback-gc] card {GC_CARD}: {len(gc_rows)} GCs -> {GC_OUT}")
+
 
 if __name__ == "__main__":
     main()
