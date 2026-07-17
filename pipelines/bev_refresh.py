@@ -914,17 +914,21 @@ def main():
             if 0 <= age < len(GG_MCOLS):
                 c['cells'][age].append({'s': sid, 'n': nm, 'hit1': '%d-%02d' % (h1 // 100, h1 % 100),
                                         'hit2': '%d-%02d' % (gm // 100, gm % 100), 'age': 'M%d' % age})
+    _gg_yms = sorted(ggcoh)
     ggc_rows = []
-    for ym in sorted(ggcoh):
+    for _idx, ym in enumerate(_gg_yms):
         c = ggcoh[ym]; n = c['n']; conv = sum(len(v) for v in c['cells'].values())
         grand = round(conv / n * 100) if n else 0
         maturity = min(len(GG_MCOLS) - 1, (cur_ym // 100 - ym // 100) * 12 + (cur_ym % 100 - ym % 100))
+        # Rolling target by recency: latest cohort month = 55%, 2nd-latest = 65%, all older = 70%.
+        _rank = len(_gg_yms) - 1 - _idx   # 0 = latest month
+        tgt = 55 if _rank == 0 else 65 if _rank == 1 else 70
         ggc_rows.append({
             'ym': '%d-%02d' % (ym // 100, ym % 100), 'label': MON3b[ym % 100 - 1] + '-' + str(ym // 100)[2:],
             'n': n, 'golives': conv,
             'cells': {('M%d' % a): (round(len(c['cells'][a]) / n * 100) if n else 0) for a in range(len(GG_MCOLS))},
             'counts': {('M%d' % a): len(c['cells'][a]) for a in range(len(GG_MCOLS))},
-            'grand': grand, 'target': 0, 'delta': grand, 'maturity': maturity,
+            'grand': grand, 'target': tgt, 'delta': grand - tgt, 'maturity': maturity,
             'detail': {('M%d' % a): c['cells'][a] for a in range(len(GG_MCOLS)) if c['cells'][a]}, 'sellers': c['sellers'],
         })
     google_golive_cohort = {'mcols': GG_MCOLS, 'targetVec': {'M0': 0, 'M1': 0, 'M2': 0}, 'grandTarget': 0, 'rows': ggc_rows}
