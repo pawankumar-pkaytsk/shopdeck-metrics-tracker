@@ -886,7 +886,7 @@ def main():
     # ---- Google golive cohorts (toggle HIT1/HIT2/HIT1+HIT2/Revenue) + Google-HIT conversion ----
     # golive % = google golives at age M0/M1/M2 after the cohort reference month, / cohort size.
     # Reference month: HIT1 = hit1 month, HIT2 = hit2 month, Revenue = first any-spend month (card 11852).
-    GG_MCOLS = ['M0', 'M1', 'M2']
+    GG_MCOLS = ['M0', 'M1', 'M2', 'M3', 'M4']
     gg_month = {}   # seller -> first google-golive month (card 11850, all universes)
     try:
         for r in req(f"{url}/api/card/11850/query/json", 'POST', {}, H):
@@ -939,7 +939,7 @@ def main():
                 'grand': grand, 'target': tgt, 'delta': grand - tgt, 'maturity': maturity,
                 'detail': {('M%d' % a): c['cells'][a] for a in range(len(GG_MCOLS)) if c['cells'][a]}, 'sellers': c['sellers'],
             })
-        return {'mcols': GG_MCOLS, 'targetVec': {'M0': 0, 'M1': 0, 'M2': 0}, 'grandTarget': 0, 'rows': rows}
+        return {'mcols': GG_MCOLS, 'targetVec': {m: 0 for m in GG_MCOLS}, 'grandTarget': 0, 'rows': rows}
 
     hit1_pairs, hit2_pairs, rev_pairs, hit1_sids = [], [], [], set()
     for r in hitrows:
