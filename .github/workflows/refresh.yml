@@ -86,6 +86,9 @@ jobs:
       - name: Callback SLA adherence (card 11646)
         continue-on-error: true
         run: python pipelines/callback_sla_refresh.py
+      - name: Cohort Analysis 1k-5k (card 11838)
+        continue-on-error: true
+        run: python pipelines/cohort_1k5k_refresh.py
       - name: Seller call records (card 9688, sharded)
         continue-on-error: true
         run: python pipelines/calls_refresh.py
