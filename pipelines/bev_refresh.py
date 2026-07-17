@@ -883,6 +883,53 @@ def main():
                          'grandTarget': GHIT_GRAND_TARGET, 'rows': ghc_rows}
     print(f"[bev2] HIT1->Google HIT cohort: {len(ghc_rows)} cohort months")
 
+    # HIT1 -> Google golive cohort (1k-5k), card 11730 golive_month vs HIT1 month.
+    # M0 = golive same month as HIT1, M1 = +1mo, M2 = +2mo; % = golives / all 1k-5k sellers HIT that month.
+    GG_MCOLS = ['M0', 'M1', 'M2']
+    gg_month = {}
+    try:
+        for r in req(f"{url}/api/card/11730/query/json", 'POST', {}, H):
+            sid = str(r.get('seller_id') or '').strip(); gm = r.get('golive_month')
+            if sid and gm:
+                try: gg_month[sid] = int(str(gm)[:4]) * 100 + int(str(gm)[5:7])
+                except (ValueError, TypeError): pass
+        print(f"[bev2] card 11730 google golive: {len(gg_month)} sellers")
+    except Exception as _e:
+        print(f"[bev2] card 11730 failed: {_e}")
+    ggcoh = {}
+    for r in hitrows:
+        if str(r.get('good_seller')).strip() in ('1', '1.0', 'True', 'true'):
+            continue
+        if not (str(r.get('team') or '').strip().upper() == 'HITS' or str(r.get('hit2')).strip() in ('1', '1.0', 'True', 'true')):
+            continue
+        h1 = _ymv(r.get('hit_year'), r.get('hit_month'))
+        if not h1 or h1 < 202602:
+            continue
+        sid = str(r.get('seller_id') or '').strip(); nm = str(r.get('seller_name') or '')
+        c = ggcoh.setdefault(h1, {'n': 0, 'sellers': [], 'cells': defaultdict(list)})
+        c['n'] += 1; c['sellers'].append({'s': sid, 'n': nm})
+        gm = gg_month.get(sid)
+        if gm and gm >= h1:
+            age = (gm // 100 - h1 // 100) * 12 + (gm % 100 - h1 % 100)
+            if 0 <= age < len(GG_MCOLS):
+                c['cells'][age].append({'s': sid, 'n': nm, 'hit1': '%d-%02d' % (h1 // 100, h1 % 100),
+                                        'hit2': '%d-%02d' % (gm // 100, gm % 100), 'age': 'M%d' % age})
+    ggc_rows = []
+    for ym in sorted(ggcoh):
+        c = ggcoh[ym]; n = c['n']; conv = sum(len(v) for v in c['cells'].values())
+        grand = round(conv / n * 100) if n else 0
+        maturity = min(len(GG_MCOLS) - 1, (cur_ym // 100 - ym // 100) * 12 + (cur_ym % 100 - ym % 100))
+        ggc_rows.append({
+            'ym': '%d-%02d' % (ym // 100, ym % 100), 'label': MON3b[ym % 100 - 1] + '-' + str(ym // 100)[2:],
+            'n': n, 'golives': conv,
+            'cells': {('M%d' % a): (round(len(c['cells'][a]) / n * 100) if n else 0) for a in range(len(GG_MCOLS))},
+            'counts': {('M%d' % a): len(c['cells'][a]) for a in range(len(GG_MCOLS))},
+            'grand': grand, 'target': 0, 'delta': grand, 'maturity': maturity,
+            'detail': {('M%d' % a): c['cells'][a] for a in range(len(GG_MCOLS)) if c['cells'][a]}, 'sellers': c['sellers'],
+        })
+    google_golive_cohort = {'mcols': GG_MCOLS, 'targetVec': {'M0': 0, 'M1': 0, 'M2': 0}, 'grandTarget': 0, 'rows': ggc_rows}
+    print(f"[bev2] HIT1->Google golive cohort (11730): {len(ggc_rows)} cohort months")
+
     # ---- ARR cohort matrices (1k-5k) by channel (meta/google/both), 3 populations ----
     # rows = HIT1 month, M{age} = avg ARR/seller at that cohort age. Channel ARR from card 10892
     # (currently ~30d window; will deepen to 6 months later). Populations: HIT1+HIT2, HIT1-only, HIT2-only.
@@ -1345,6 +1392,7 @@ def main():
         'hit2Mom': hit2_mom,
         'hit2Cohort': hit2_cohort,
         'googleHitCohort': google_hit_cohort,
+        'googleGoliveCohort': google_golive_cohort,
         'arrCohort': arr_cohort,
         'arrBuckets': arr_buckets,
         'hit2ArrSpendMom': hit2_mom_perf,
