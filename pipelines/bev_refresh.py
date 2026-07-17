@@ -1371,20 +1371,25 @@ def main():
             platform_wk.append({
                 'yw': str(_r.get('year_week') or ''),
                 'sellers': _r.get('sellers'),
-                'orders': _r.get('orders_total'),
+                'orders': _r.get('total_orders'),
+                'awbNc': _r.get('awb_nc'),
                 'rto': _pn(_r.get('rto_perc')),
-                'avgRto': _pn(_r.get('simple_avg_rto')),
-                'cancel': _pn(_r.get('cancellation')),
                 'sGmv': _pn(_r.get('s_gmv')),
-                'newSGmv': _pn(_r.get('new_s_gmv')),
-                'avgFbGmv': _pn(_r.get('simple_avg_fb_s_gmv')),
-                'cogs': _pn(_r.get('platform_cogs')),
+                'cogs': _pn(_r.get('cogs_percentage')),
+                'cancel': _pn(_r.get('cancel_perc')),
                 'aov': _pn(_r.get('aov')),
                 'logsCost': _pn(_r.get('per_awb_logs_cost')),
             })
         print(f"[bev2] platform 1k-5k (card 11746): {len(platform_wk)} weeks")
     except Exception as _e:
         print(f"[bev2] card 11746 platform failed: {_e}")
+        try:  # no-clobber: keep last-good platform weeks if the card query is erroring
+            _prev = (json.load(open(os.path.join(REPO, 'bev_data.json'))).get('bev2', {}) or {}).get('platformWk')
+            if _prev:
+                platform_wk = _prev
+                print(f"[bev2] platform: reused {len(_prev)} prior weeks (no-clobber)")
+        except Exception:
+            pass
 
     bev2 = {
         'window': {'from': good_dates[0] if good_dates else '', 'to': as_of},
