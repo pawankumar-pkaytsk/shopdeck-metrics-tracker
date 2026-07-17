@@ -883,56 +883,122 @@ def main():
                          'grandTarget': GHIT_GRAND_TARGET, 'rows': ghc_rows}
     print(f"[bev2] HIT1->Google HIT cohort: {len(ghc_rows)} cohort months")
 
-    # HIT1 -> Google golive cohort (1k-5k), card 11730 golive_month vs HIT1 month.
-    # M0 = golive same month as HIT1, M1 = +1mo, M2 = +2mo; % = golives / all 1k-5k sellers HIT that month.
+    # ---- Google golive cohorts (toggle HIT1/HIT2/HIT1+HIT2/Revenue) + Google-HIT conversion ----
+    # golive % = google golives at age M0/M1/M2 after the cohort reference month, / cohort size.
+    # Reference month: HIT1 = hit1 month, HIT2 = hit2 month, Revenue = first any-spend month (card 11852).
     GG_MCOLS = ['M0', 'M1', 'M2']
-    gg_month = {}
+    gg_month = {}   # seller -> first google-golive month (card 11850, all universes)
     try:
-        for r in req(f"{url}/api/card/11730/query/json", 'POST', {}, H):
-            sid = str(r.get('seller_id') or '').strip(); gm = r.get('golive_month')
+        for r in req(f"{url}/api/card/11850/query/json", 'POST', {}, H):
+            sid = str(r.get('seller_id') or '').strip(); gm = r.get('google_golive_month')
             if sid and gm:
                 try: gg_month[sid] = int(str(gm)[:4]) * 100 + int(str(gm)[5:7])
                 except (ValueError, TypeError): pass
-        print(f"[bev2] card 11730 google golive: {len(gg_month)} sellers")
+        print(f"[bev2] card 11850 google golive: {len(gg_month)} sellers")
     except Exception as _e:
-        print(f"[bev2] card 11730 failed: {_e}")
-    ggcoh = {}
+        print(f"[bev2] card 11850 failed: {_e}")
+    first_spend = {}   # seller -> first any-spend month (card 11852, Revenue reference)
+    try:
+        for r in req(f"{url}/api/card/11852/query/json", 'POST', {}, H):
+            sid = str(r.get('seller_id') or '').strip(); fm = r.get('first_spend_month')
+            if sid and fm:
+                try: first_spend[sid] = int(str(fm)[:4]) * 100 + int(str(fm)[5:7])
+                except (ValueError, TypeError): pass
+        print(f"[bev2] card 11852 first spend: {len(first_spend)} sellers")
+    except Exception as _e:
+        print(f"[bev2] card 11852 failed: {_e}")
+
+    _name_by = {str(r.get('seller_id') or '').strip(): str(r.get('seller_name') or '') for r in hitrows}
+    _tv = ('1', '1.0', 'True', 'true')
+
+    def build_golive_cohort(pairs, min_ym):
+        coh = {}
+        for sid, ref, nm in pairs:
+            if not ref or ref < min_ym:
+                continue
+            c = coh.setdefault(ref, {'n': 0, 'sellers': [], 'cells': defaultdict(list)})
+            c['n'] += 1; c['sellers'].append({'s': sid, 'n': nm})
+            gm = gg_month.get(sid)
+            if gm and gm >= ref:
+                age = (gm // 100 - ref // 100) * 12 + (gm % 100 - ref % 100)
+                if 0 <= age < len(GG_MCOLS):
+                    c['cells'][age].append({'s': sid, 'n': nm, 'hit1': '%d-%02d' % (ref // 100, ref % 100),
+                                            'hit2': '%d-%02d' % (gm // 100, gm % 100), 'age': 'M%d' % age})
+        yms = sorted(coh); rows = []
+        for idx, ym in enumerate(yms):
+            c = coh[ym]; n = c['n']; conv = sum(len(v) for v in c['cells'].values())
+            grand = round(conv / n * 100) if n else 0
+            rank = len(yms) - 1 - idx   # 0 = latest
+            tgt = 55 if rank == 0 else 65 if rank == 1 else 70   # rolling target
+            maturity = min(len(GG_MCOLS) - 1, (cur_ym // 100 - ym // 100) * 12 + (cur_ym % 100 - ym % 100))
+            rows.append({
+                'ym': '%d-%02d' % (ym // 100, ym % 100), 'label': MON3b[ym % 100 - 1] + '-' + str(ym // 100)[2:],
+                'n': n, 'golives': conv,
+                'cells': {('M%d' % a): (round(len(c['cells'][a]) / n * 100) if n else 0) for a in range(len(GG_MCOLS))},
+                'counts': {('M%d' % a): len(c['cells'][a]) for a in range(len(GG_MCOLS))},
+                'grand': grand, 'target': tgt, 'delta': grand - tgt, 'maturity': maturity,
+                'detail': {('M%d' % a): c['cells'][a] for a in range(len(GG_MCOLS)) if c['cells'][a]}, 'sellers': c['sellers'],
+            })
+        return {'mcols': GG_MCOLS, 'targetVec': {'M0': 0, 'M1': 0, 'M2': 0}, 'grandTarget': 0, 'rows': rows}
+
+    hit1_pairs, hit2_pairs, rev_pairs, hit1_sids = [], [], [], set()
     for r in hitrows:
-        if str(r.get('good_seller')).strip() in ('1', '1.0', 'True', 'true'):
+        sid = str(r.get('seller_id') or '').strip()
+        if not sid:
             continue
-        if not (str(r.get('team') or '').strip().upper() == 'HITS' or str(r.get('hit2')).strip() in ('1', '1.0', 'True', 'true')):
-            continue
-        h1 = _ymv(r.get('hit_year'), r.get('hit_month'))
-        if not h1 or h1 < 202602:
-            continue
-        sid = str(r.get('seller_id') or '').strip(); nm = str(r.get('seller_name') or '')
-        c = ggcoh.setdefault(h1, {'n': 0, 'sellers': [], 'cells': defaultdict(list)})
-        c['n'] += 1; c['sellers'].append({'s': sid, 'n': nm})
+        nm = _name_by.get(sid, '')
+        good = str(r.get('good_seller')).strip() in _tv
+        h2 = str(r.get('hit2')).strip() in _tv
+        hits = str(r.get('team') or '').strip().upper() == 'HITS'
+        h1m = _ymv(r.get('hit_year'), r.get('hit_month'))
+        h2m = _ymv(r.get('hit2_year'), r.get('hit2_month'))
+        if not good and (hits or h2) and h1m:
+            hit1_pairs.append((sid, h1m, nm)); hit1_sids.add(sid)
+        if h2 and h2m:
+            hit2_pairs.append((sid, h2m, nm))
+        if not good and not hits and not h2:   # Revenue = in 10453 but not HIT1/HIT2/good
+            rev_pairs.append((sid, first_spend.get(sid), nm))
+    google_golive_toggle = {
+        'hit1': build_golive_cohort(hit1_pairs, 202602),
+        'hit2': build_golive_cohort(hit2_pairs, 202601),
+        'both': build_golive_cohort(hit1_pairs + hit2_pairs, 202601),
+        'revenue': build_golive_cohort(rev_pairs, 202601),
+    }
+    google_golive_cohort = google_golive_toggle['hit1']   # backward-compat
+    print("[bev2] golive toggle months: hit1=%d hit2=%d both=%d rev=%d" % tuple(
+        len(google_golive_toggle[k]['rows']) for k in ('hit1', 'hit2', 'both', 'revenue')))
+
+    # New table: Google-HIT conversion — cohort by google-golive month, M0..M4 = google-HIT by that age / google-live (1k-5k)
+    HCV_MCOLS = ['M0', 'M1', 'M2', 'M3', 'M4']
+    hcv = {}
+    for sid in hit1_sids:
         gm = gg_month.get(sid)
-        if gm and gm >= h1:
-            age = (gm // 100 - h1 // 100) * 12 + (gm % 100 - h1 % 100)
-            if 0 <= age < len(GG_MCOLS):
-                c['cells'][age].append({'s': sid, 'n': nm, 'hit1': '%d-%02d' % (h1 // 100, h1 % 100),
-                                        'hit2': '%d-%02d' % (gm // 100, gm % 100), 'age': 'M%d' % age})
-    _gg_yms = sorted(ggcoh)
-    ggc_rows = []
-    for _idx, ym in enumerate(_gg_yms):
-        c = ggcoh[ym]; n = c['n']; conv = sum(len(v) for v in c['cells'].values())
+        if not gm or gm < 202601:
+            continue
+        nm = _name_by.get(sid, '')
+        c = hcv.setdefault(gm, {'n': 0, 'sellers': [], 'cells': defaultdict(list)})
+        c['n'] += 1; c['sellers'].append({'s': sid, 'n': nm})
+        hm = g_hit_month.get(sid)
+        if hm and hm >= gm:
+            age = (hm // 100 - gm // 100) * 12 + (hm % 100 - gm % 100)
+            if 0 <= age < len(HCV_MCOLS):
+                c['cells'][age].append({'s': sid, 'n': nm, 'hit1': '%d-%02d' % (gm // 100, gm % 100),
+                                        'hit2': '%d-%02d' % (hm // 100, hm % 100), 'age': 'M%d' % age})
+    hcv_rows = []
+    for ym in sorted(hcv):
+        c = hcv[ym]; n = c['n']; conv = sum(len(v) for v in c['cells'].values())
         grand = round(conv / n * 100) if n else 0
-        maturity = min(len(GG_MCOLS) - 1, (cur_ym // 100 - ym // 100) * 12 + (cur_ym % 100 - ym % 100))
-        # Rolling target by recency: latest cohort month = 55%, 2nd-latest = 65%, all older = 70%.
-        _rank = len(_gg_yms) - 1 - _idx   # 0 = latest month
-        tgt = 55 if _rank == 0 else 65 if _rank == 1 else 70
-        ggc_rows.append({
+        maturity = min(len(HCV_MCOLS) - 1, (cur_ym // 100 - ym // 100) * 12 + (cur_ym % 100 - ym % 100))
+        hcv_rows.append({
             'ym': '%d-%02d' % (ym // 100, ym % 100), 'label': MON3b[ym % 100 - 1] + '-' + str(ym // 100)[2:],
-            'n': n, 'golives': conv,
-            'cells': {('M%d' % a): (round(len(c['cells'][a]) / n * 100) if n else 0) for a in range(len(GG_MCOLS))},
-            'counts': {('M%d' % a): len(c['cells'][a]) for a in range(len(GG_MCOLS))},
-            'grand': grand, 'target': tgt, 'delta': grand - tgt, 'maturity': maturity,
-            'detail': {('M%d' % a): c['cells'][a] for a in range(len(GG_MCOLS)) if c['cells'][a]}, 'sellers': c['sellers'],
+            'n': n, 'golives': n,
+            'cells': {('M%d' % a): (round(len(c['cells'][a]) / n * 100) if n else 0) for a in range(len(HCV_MCOLS))},
+            'counts': {('M%d' % a): len(c['cells'][a]) for a in range(len(HCV_MCOLS))},
+            'grand': grand, 'target': 0, 'delta': grand, 'maturity': maturity,
+            'detail': {('M%d' % a): c['cells'][a] for a in range(len(HCV_MCOLS)) if c['cells'][a]}, 'sellers': c['sellers'],
         })
-    google_golive_cohort = {'mcols': GG_MCOLS, 'targetVec': {'M0': 0, 'M1': 0, 'M2': 0}, 'grandTarget': 0, 'rows': ggc_rows}
-    print(f"[bev2] HIT1->Google golive cohort (11730): {len(ggc_rows)} cohort months")
+    google_hit_conv = {'mcols': HCV_MCOLS, 'targetVec': {m: 0 for m in HCV_MCOLS}, 'grandTarget': 0, 'rows': hcv_rows}
+    print(f"[bev2] Google-HIT conversion (golive-month cohort): {len(hcv_rows)} months")
 
     # ---- ARR cohort matrices (1k-5k) by channel (meta/google/both), 3 populations ----
     # rows = HIT1 month, M{age} = avg ARR/seller at that cohort age. Channel ARR from card 10892
@@ -1402,6 +1468,8 @@ def main():
         'hit2Cohort': hit2_cohort,
         'googleHitCohort': google_hit_cohort,
         'googleGoliveCohort': google_golive_cohort,
+        'googleGoliveToggle': google_golive_toggle,
+        'googleHitConv': google_hit_conv,
         'arrCohort': arr_cohort,
         'arrBuckets': arr_buckets,
         'hit2ArrSpendMom': hit2_mom_perf,
