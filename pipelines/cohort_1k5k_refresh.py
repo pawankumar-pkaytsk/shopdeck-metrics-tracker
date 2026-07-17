@@ -7,7 +7,7 @@ Run: cd ~/shopdeck-metrics-site && python3 pipelines/cohort_1k5k_refresh.py
 """
 import json, os, urllib.request, datetime
 
-CARD = 11838
+CARD = 11840   # seller-level cohort detail (cohort_month x relative_week x seller_id x company x sw_spend)
 REPO = os.path.expanduser(os.environ.get("REPO_DIR", "~/shopdeck-metrics-site"))
 OUT = os.path.join(REPO, "cohort_1k5k_data.json")
 CRED_CACHE = os.path.expanduser("~/metabase-arr-refresh/.mbcreds")
@@ -50,24 +50,36 @@ def main():
 
     rows = req(f"{url}/api/card/{CARD}/query/json", "POST", {}, H)
     max_week = 0
-    by = {}
+    det = {}   # cohort -> week -> [ {s, n, sp} ]  (all sellers present that week)
     for r in rows:
         cm = str(r.get("cohort_month") or "")
         w = r.get("relative_week")
         if not cm or w is None:
             continue
         w = int(w); max_week = max(max_week, w)
-        by.setdefault(cm, {})[w] = {
-            "t": r.get("total_sellers"), "s": r.get("spending_sellers"), "g": r.get("gt3k_sellers"),
-        }
-    cohorts = sorted(by.keys(), reverse=True)
-    out_rows = [{"cohort": cm, "cells": {str(w): by[cm][w] for w in sorted(by[cm])}} for cm in cohorts]
+        try: sp = round(float(r.get("sw_spend") or 0))
+        except (TypeError, ValueError): sp = 0
+        det.setdefault(cm, {}).setdefault(w, []).append(
+            {"s": str(r.get("seller_id") or ""), "n": str(r.get("company") or ""), "sp": sp})
+    cohorts = sorted(det.keys(), reverse=True)
+    out_rows = []
+    for cm in cohorts:
+        cells, dcell = {}, {}
+        for w in sorted(det[cm]):
+            sellers = sorted(det[cm][w], key=lambda x: -x["sp"])
+            cells[str(w)] = {
+                "t": len(sellers),
+                "s": sum(1 for x in sellers if x["sp"] > 0),
+                "g": sum(1 for x in sellers if x["sp"] >= 3000),
+            }
+            dcell[str(w)] = sellers
+        out_rows.append({"cohort": cm, "cells": cells, "det": dcell})
     out = {
         "generatedAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "maxWeek": max_week, "cohorts": cohorts, "rows": out_rows,
     }
     json.dump(out, open(OUT, "w"), separators=(",", ":"))
-    print(f"[cohort-1k5k] card {CARD}: {len(cohorts)} cohorts, W0..W{max_week} -> {OUT}")
+    print(f"[cohort-1k5k] card {CARD}: {len(cohorts)} cohorts, W0..W{max_week}, {len(rows)} seller-weeks -> {OUT}")
 
 
 if __name__ == "__main__":
