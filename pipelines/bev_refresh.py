@@ -957,7 +957,10 @@ def main():
         if h2 and h2m:
             hit2_pairs.append((sid, h2m, nm))
         if not good and not hits and not h2:   # Revenue = in 10453 but not HIT1/HIT2/good
-            rev_pairs.append((sid, first_spend.get(sid), nm))
+            _fs = first_spend.get(sid)
+            if _fs and _fs < 202601:   # anchor the revenue window at Jan-2026: pre-2026 sellers count from Jan-26
+                _fs = 202601
+            rev_pairs.append((sid, _fs, nm))
     google_golive_toggle = {
         'hit1': build_golive_cohort(hit1_pairs, 202602),
         'hit2': build_golive_cohort(hit2_pairs, 202601),
