@@ -655,7 +655,9 @@ def main():
     # Card 11815's own hit_sellers filter is ((team='HITS' AND good_seller IS NULL) OR hit2=1),
     # i.e. HIT1+HIT2. We clone its SQL and swap that predicate per universe (same universe logic
     # as the golive/hit-conversion toggles): HIT1 = HITS non-good, HIT2 = hit2=1, both = either,
-    # Revenue = non-HITS non-good non-hit2.
+    # Revenue = non-HITS non-good non-hit2. NB: revenue sellers have team IS NULL, so the team
+    # comparison must be NULL-safe — `team != 'HITS'` alone drops every NULL-team row (SQL 3-valued
+    # logic). Revenue book = 2485 sellers in 10453/hit_master_data, ~488 present in card 9104 (Google-HIT).
     def _g_weekly_rows(rows_in):
         out = []
         for _r in sorted(rows_in, key=lambda x: -(int(x.get('year_week') or 0))):
@@ -687,7 +689,7 @@ def main():
             'hit1': "h.team = 'HITS' AND h.good_seller IS NULL",
             'hit2': "h.hit2 = 1",
             'both': "(h.team = 'HITS' AND h.good_seller IS NULL) OR h.hit2 = 1",
-            'revenue': "h.good_seller IS NULL AND h.team != 'HITS' AND (h.hit2 IS NULL OR h.hit2 != 1)",
+            'revenue': "h.good_seller IS NULL AND (h.team IS NULL OR h.team != 'HITS') AND (h.hit2 IS NULL OR h.hit2 != 1)",
         }
         for _u, _pred in _G15UNI.items():
             _sql2 = _g15sql.replace(_g15orig, "  WHERE (" + _pred + ")\n    AND (gst.total_goog_spend >= 10)")
