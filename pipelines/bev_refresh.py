@@ -658,9 +658,12 @@ def main():
     # Revenue = non-HITS non-good non-hit2. NB: revenue sellers have team IS NULL, so the team
     # comparison must be NULL-safe — `team != 'HITS'` alone drops every NULL-team row (SQL 3-valued
     # logic). Revenue book = 2485 sellers in 10453/hit_master_data, ~488 present in card 9104 (Google-HIT).
+    G15_MIN_YW = 202608   # show only weeks >= 2026-W08 (trims the long revenue-book history)
     def _g_weekly_rows(rows_in):
         out = []
         for _r in sorted(rows_in, key=lambda x: -(int(x.get('year_week') or 0))):
+            if (int(_r.get('year_week') or 0)) < G15_MIN_YW:
+                continue
             out.append({
                 'yw': str(_r.get('year_week') or ''),
                 'total': _r.get('total'),
