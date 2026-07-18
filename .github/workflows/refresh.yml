@@ -95,6 +95,9 @@ jobs:
       - name: Seller call records (card 9688, sharded)
         continue-on-error: true
         run: python pipelines/calls_refresh.py
+      - name: Hypercare Movement (card 9353)
+        continue-on-error: true
+        run: python pipelines/hypercare_movement_refresh.py
 
       - name: Snapshot (dated, compressed archive for time-travel)
         continue-on-error: true
