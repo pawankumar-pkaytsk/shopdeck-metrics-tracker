@@ -12,6 +12,7 @@ Run: cd ~/shopdeck-metrics-site && python3 pipelines/hypercare_movement_refresh.
 import json, os, re, datetime, urllib.request
 
 CARD = 9353
+MAP_CARD = 7753   # seller_manager_mapping (seller_id -> GC / GM)
 REPO = os.path.expanduser(os.environ.get("REPO_DIR", "~/shopdeck-metrics-site"))
 OUT = os.path.join(REPO, "hypercare_movement_data.json")
 CRED_CACHE = os.path.expanduser("~/metabase-arr-refresh/.mbcreds")
@@ -116,6 +117,60 @@ def main():
     day_rows = _emit(day_acc, "d", lambda k: k)
     week_rows = _emit(week_acc, "yw", lambda k: str(k))
 
+    # --- Yesterday movement with GC/GM mapping (card 7753) -------------------
+    # "yesterday" = the calendar day before the refresh runs (created_at is naive IST).
+    yday = (datetime.datetime.utcnow() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    y_rows = [r for r in rows if str(r.get("created_at"))[:10] == yday and _cat(r.get("title"))]
+
+    smap = {}   # seller_id -> {gc, gm}
+    if y_rows:
+        _clean = lambda v: (str(v).strip() if v not in (None, "", "-") else None)
+        for mr in req(f"{url}/api/card/{MAP_CARD}/query/json", "POST", {}, H):
+            sid = str(mr.get("seller_id") or "")
+            if sid:
+                smap[sid] = {"gc": _clean(mr.get("growth_consultant_name")),
+                             "gm": _clean(mr.get("growth_manager_name"))}
+
+    UNMAP = "Unmapped"
+    gm_acc, gcgm_acc = {}, {}
+    y_unmapped = 0
+    for r in y_rows:
+        cat = _cat(r.get("title"))
+        sid = str(r.get("seller_id") or "")
+        mp = smap.get(sid) or {}
+        gm = mp.get("gm") or UNMAP
+        gc = mp.get("gc") or UNMAP
+        if gm == UNMAP:
+            y_unmapped += 1
+        gm_acc.setdefault(gm, {}).setdefault(cat, 0)
+        gm_acc[gm][cat] += 1
+        gcgm_acc.setdefault((gm, gc), {}).setdefault(cat, 0)
+        gcgm_acc[(gm, gc)][cat] += 1
+
+    def _row(counts):
+        row, tot = {}, 0
+        for cat in CATS:
+            n = counts.get(cat, 0); row[KEY[cat]] = n; tot += n
+        row["total"] = tot
+        return row
+
+    y_gm = []
+    for gm in sorted(gm_acc, key=lambda g: (g == UNMAP, -sum(gm_acc[g].values()))):
+        y_gm.append({"gm": gm, **_row(gm_acc[gm])})
+    y_gcgm = []
+    for (gm, gc) in sorted(gcgm_acc, key=lambda t: (t[0] == UNMAP, t[0], -sum(gcgm_acc[t].values()))):
+        y_gcgm.append({"gm": gm, "gc": gc, **_row(gcgm_acc[(gm, gc)])})
+
+    yesterday = {
+        "date": yday,
+        "gm": y_gm,
+        "gcgm": y_gcgm,
+        "totals": _row({cat: sum(v.get(cat, 0) for v in gm_acc.values()) for cat in CATS}),
+        "unmapped": y_unmapped,
+        "tasks": len(y_rows),
+    }
+    print(f"[hypercare-mvmt] yesterday {yday}: {len(y_rows)} tasks · {len(y_gm)} GMs · {y_unmapped} unmapped")
+
     out = {
         "generatedAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "card": CARD,
@@ -124,6 +179,7 @@ def main():
                      "pct": round(iso_match / iso_total * 100, 2) if iso_total else None},
         "day": day_rows,
         "week": week_rows,
+        "yesterday": yesterday,
         "dayRange": {"min": day_rows[0]["d"] if day_rows else None, "max": day_rows[-1]["d"] if day_rows else None},
     }
     json.dump(out, open(OUT, "w"), separators=(",", ":"))
