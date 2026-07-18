@@ -12,7 +12,7 @@ Run: cd ~/shopdeck-metrics-site && python3 pipelines/hypercare_movement_refresh.
 import json, os, re, datetime, urllib.request
 
 CARD = 9353
-MAP_CARD = 7753   # seller_manager_mapping (seller_id -> GC / GM)
+CHANGELOG_CARD = 10992   # GC/GM/KAM assignment changelog (seller_id, assignee role, name, start/end)
 REPO = os.path.expanduser(os.environ.get("REPO_DIR", "~/shopdeck-metrics-site"))
 OUT = os.path.join(REPO, "hypercare_movement_data.json")
 CRED_CACHE = os.path.expanduser("~/metabase-arr-refresh/.mbcreds")
@@ -117,30 +117,50 @@ def main():
     day_rows = _emit(day_acc, "d", lambda k: k)
     week_rows = _emit(week_acc, "yw", lambda k: str(k))
 
-    # --- Yesterday movement with GC/GM mapping (card 7753) -------------------
+    # --- Yesterday movement with PREVIOUS GC/GM mapping (card 10992 changelog) ---
     # "yesterday" = the calendar day before the refresh runs (created_at is naive IST).
     yday = (datetime.datetime.utcnow() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
     y_rows = [r for r in rows if str(r.get("created_at"))[:10] == yday and _cat(r.get("title"))]
 
-    smap = {}   # seller_id -> {gc, gm}
-    if y_rows:
-        _clean = lambda v: (str(v).strip() if v not in (None, "", "-") else None)
-        for mr in req(f"{url}/api/card/{MAP_CARD}/query/json", "POST", {}, H):
-            sid = str(mr.get("seller_id") or "")
-            if sid:
-                smap[sid] = {"gc": _clean(mr.get("growth_consultant_name")),
-                             "gm": _clean(mr.get("growth_manager_name"))}
+    # Mapping = the GC/GM the seller had BEFORE they were moved into the revival/hypercare team.
+    # Card 7753 (current mapping) collapses everyone onto the hypercare GM post-move, so instead we
+    # read the assignment changelog (card 10992): for each revival task, find the GM interval active
+    # at created_at (the revival GM), take its start_date S as the move boundary, and report the GC
+    # and GM whose intervals ended at/just before S — i.e. the assignment prior to the unassignment.
+    def _dt(d):
+        try: return datetime.datetime.fromisoformat(str(d)[:19])
+        except Exception: return None
 
-    UNMAP = "Unmapped"
+    chlog = {}   # seller_id -> list of records
+    if y_rows:
+        for cr in req(f"{url}/api/card/{CHANGELOG_CARD}/query/json", "POST", {}, H):
+            chlog.setdefault(str(cr.get("seller_id") or ""), []).append(cr)
+
+    def _prev_gc_gm(sid, ca):
+        recs = chlog.get(sid, [])
+        gms = [x for x in recs if x.get("assignee") == "GM" and _dt(x.get("start_date"))]
+        act = [x for x in gms if _dt(x["start_date"]) <= ca and (not x.get("end_date") or _dt(x["end_date"]) >= ca)]
+        if not act:
+            return None, None
+        S = _dt(act[-1]["start_date"])   # boundary: when the seller entered the current (revival) GM
+
+        def prev(role):
+            cand = [x for x in recs if x.get("assignee") == role and _dt(x.get("end_date")) and _dt(x["end_date"]) <= S]
+            cand.sort(key=lambda x: _dt(x["end_date"]))
+            nm = str(cand[-1].get("name")).strip() if cand else ""
+            return nm or None
+        return prev("GC"), prev("GM")
+
+    UNK = "Unknown"
     gm_acc, gcgm_acc = {}, {}
     y_unmapped = 0
     for r in y_rows:
         cat = _cat(r.get("title"))
         sid = str(r.get("seller_id") or "")
-        mp = smap.get(sid) or {}
-        gm = mp.get("gm") or UNMAP
-        gc = mp.get("gc") or UNMAP
-        if gm == UNMAP:
+        gc, gm = _prev_gc_gm(sid, _dt(r.get("created_at")))
+        gm = gm or UNK
+        gc = gc or UNK
+        if gm == UNK:
             y_unmapped += 1
         gm_acc.setdefault(gm, {}).setdefault(cat, 0)
         gm_acc[gm][cat] += 1
@@ -155,10 +175,10 @@ def main():
         return row
 
     y_gm = []
-    for gm in sorted(gm_acc, key=lambda g: (g == UNMAP, -sum(gm_acc[g].values()))):
+    for gm in sorted(gm_acc, key=lambda g: (g == UNK, -sum(gm_acc[g].values()))):
         y_gm.append({"gm": gm, **_row(gm_acc[gm])})
     y_gcgm = []
-    for (gm, gc) in sorted(gcgm_acc, key=lambda t: (t[0] == UNMAP, t[0], -sum(gcgm_acc[t].values()))):
+    for (gm, gc) in sorted(gcgm_acc, key=lambda t: (t[0] == UNK, t[0], -sum(gcgm_acc[t].values()))):
         y_gcgm.append({"gm": gm, "gc": gc, **_row(gcgm_acc[(gm, gc)])})
 
     yesterday = {
