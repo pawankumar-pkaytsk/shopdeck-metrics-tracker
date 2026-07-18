@@ -968,37 +968,74 @@ def main():
     print("[bev2] golive toggle months: hit1=%d hit2=%d both=%d rev=%d" % tuple(
         len(google_golive_toggle[k]['rows']) for k in ('hit1', 'hit2', 'both', 'revenue')))
 
-    # New table: Google-HIT conversion — cohort by google-golive month, M0..M4 = google-HIT by that age / google-live (1k-5k)
+    # ---- Google-HIT conversion cohorts (toggle HIT1/HIT2/HIT1+HIT2/Revenue) ----
+    # Reusable builder: pairs=[(sid, ref_ym, name)], conv_map=sid->conversion month; % = conv at age / cohort size.
     HCV_MCOLS = ['M0', 'M1', 'M2', 'M3', 'M4']
-    hcv = {}
-    for sid in hit1_sids:
-        gm = gg_month.get(sid)
-        if not gm or gm < 202601:
-            continue
-        nm = _name_by.get(sid, '')
-        c = hcv.setdefault(gm, {'n': 0, 'sellers': [], 'cells': defaultdict(list)})
-        c['n'] += 1; c['sellers'].append({'s': sid, 'n': nm})
-        hm = g_hit_month.get(sid)
-        if hm and hm >= gm:
-            age = (hm // 100 - gm // 100) * 12 + (hm % 100 - gm % 100)
-            if 0 <= age < len(HCV_MCOLS):
-                c['cells'][age].append({'s': sid, 'n': nm, 'hit1': '%d-%02d' % (gm // 100, gm % 100),
-                                        'hit2': '%d-%02d' % (hm // 100, hm % 100), 'age': 'M%d' % age})
-    hcv_rows = []
-    for ym in sorted(hcv):
-        c = hcv[ym]; n = c['n']; conv = sum(len(v) for v in c['cells'].values())
-        grand = round(conv / n * 100) if n else 0
-        maturity = min(len(HCV_MCOLS) - 1, (cur_ym // 100 - ym // 100) * 12 + (cur_ym % 100 - ym % 100))
-        hcv_rows.append({
-            'ym': '%d-%02d' % (ym // 100, ym % 100), 'label': MON3b[ym % 100 - 1] + '-' + str(ym // 100)[2:],
-            'n': n, 'golives': n,
-            'cells': {('M%d' % a): (round(len(c['cells'][a]) / n * 100) if n else 0) for a in range(len(HCV_MCOLS))},
-            'counts': {('M%d' % a): len(c['cells'][a]) for a in range(len(HCV_MCOLS))},
-            'grand': grand, 'target': 0, 'delta': grand, 'maturity': maturity,
-            'detail': {('M%d' % a): c['cells'][a] for a in range(len(HCV_MCOLS)) if c['cells'][a]}, 'sellers': c['sellers'],
-        })
-    google_hit_conv = {'mcols': HCV_MCOLS, 'targetVec': {m: 0 for m in HCV_MCOLS}, 'grandTarget': 0, 'rows': hcv_rows}
-    print(f"[bev2] Google-HIT conversion (golive-month cohort): {len(hcv_rows)} months")
+    def build_conv_cohort(pairs, conv_map, mcols, target_vec, min_ym, fill=False):
+        coh = {}
+        for sid, ref, nm in pairs:
+            if not ref or ref < min_ym:
+                continue
+            c = coh.setdefault(ref, {'n': 0, 'sellers': [], 'cells': defaultdict(list)})
+            c['n'] += 1; c['sellers'].append({'s': sid, 'n': nm})
+            cm = conv_map.get(sid)
+            if cm and cm >= ref:
+                age = (cm // 100 - ref // 100) * 12 + (cm % 100 - ref % 100)
+                if 0 <= age < len(mcols):
+                    c['cells'][age].append({'s': sid, 'n': nm, 'hit1': '%d-%02d' % (ref // 100, ref % 100),
+                                            'hit2': '%d-%02d' % (cm // 100, cm % 100), 'age': 'M%d' % age})
+        iter_yms = sorted(coh)
+        if fill and iter_yms:   # fill month gaps (e.g. a month with 0 golives) so the range is contiguous
+            _lo = iter_yms[0]; _y, _mo = _lo // 100, _lo % 100; iter_yms = []
+            while _y * 100 + _mo <= cur_ym:
+                iter_yms.append(_y * 100 + _mo)
+                _mo += 1
+                if _mo > 12:
+                    _mo = 1; _y += 1
+        rows = []
+        for ym in iter_yms:
+            if ym not in coh:
+                coh[ym] = {'n': 0, 'sellers': [], 'cells': defaultdict(list)}
+            c = coh[ym]; n = c['n']; conv = sum(len(v) for v in c['cells'].values())
+            grand = round(conv / n * 100) if n else 0
+            maturity = min(len(mcols) - 1, (cur_ym // 100 - ym // 100) * 12 + (cur_ym % 100 - ym % 100))
+            tgt = sum(target_vec.get(a, 0) for a in range(0, maturity + 1))
+            rows.append({
+                'ym': '%d-%02d' % (ym // 100, ym % 100), 'label': MON3b[ym % 100 - 1] + '-' + str(ym // 100)[2:],
+                'n': n, 'golives': n,
+                'cells': {('M%d' % a): (round(len(c['cells'][a]) / n * 100) if n else 0) for a in range(len(mcols))},
+                'counts': {('M%d' % a): len(c['cells'][a]) for a in range(len(mcols))},
+                'grand': grand, 'target': tgt, 'delta': grand - tgt, 'maturity': maturity,
+                'detail': {('M%d' % a): c['cells'][a] for a in range(len(mcols)) if c['cells'][a]}, 'sellers': c['sellers'],
+            })
+        return {'mcols': mcols, 'targetVec': {('M%d' % a): target_vec.get(a, 0) for a in range(len(mcols))},
+                'grandTarget': sum(target_vec.get(a, 0) for a in range(len(mcols))), 'rows': rows}
+
+    _hit2_sids = set(p[0] for p in hit2_pairs)
+    _both_sids = hit1_sids | _hit2_sids
+    _rev_sids = set(p[0] for p in rev_pairs)
+    def _golive_pairs(sids):
+        return [(sid, gg_month.get(sid), _name_by.get(sid, '')) for sid in sids if gg_month.get(sid)]
+
+    # Task 2: Google-HIT conversion by HIT month (cohort ref = HIT/HIT2/first month) x google-HIT age
+    google_hit_cohort_toggle = {
+        'hit1': build_conv_cohort(hit1_pairs, g_hit_month, H2_MCOLS, GHIT_TARGET_VEC, 202602),
+        'hit2': build_conv_cohort(hit2_pairs, g_hit_month, H2_MCOLS, GHIT_TARGET_VEC, 202601),
+        'both': build_conv_cohort(hit1_pairs + hit2_pairs, g_hit_month, H2_MCOLS, GHIT_TARGET_VEC, 202601),
+        'revenue': build_conv_cohort(rev_pairs, g_hit_month, H2_MCOLS, GHIT_TARGET_VEC, 202601),
+    }
+    google_hit_cohort = google_hit_cohort_toggle['hit1']   # backward-compat binding
+
+    # Task 3: Google-HIT conversion of Google-live sellers, cohort by GOLIVE month x google-HIT age
+    google_hit_conv_toggle = {
+        'hit1': build_conv_cohort(_golive_pairs(hit1_sids), g_hit_month, HCV_MCOLS, GHIT_TARGET_VEC, 202601, fill=True),
+        'hit2': build_conv_cohort(_golive_pairs(_hit2_sids), g_hit_month, HCV_MCOLS, GHIT_TARGET_VEC, 202601, fill=True),
+        'both': build_conv_cohort(_golive_pairs(_both_sids), g_hit_month, HCV_MCOLS, GHIT_TARGET_VEC, 202601, fill=True),
+        'revenue': build_conv_cohort(_golive_pairs(_rev_sids), g_hit_month, HCV_MCOLS, GHIT_TARGET_VEC, 202601, fill=True),
+    }
+    google_hit_conv = google_hit_conv_toggle['hit1']
+    print("[bev2] hit-conv toggles: hitMonth hit1=%d months · golive hit1=%d months" % (
+        len(google_hit_cohort_toggle['hit1']['rows']), len(google_hit_conv_toggle['hit1']['rows'])))
 
     # ---- ARR cohort matrices (1k-5k) by channel (meta/google/both), 3 populations ----
     # rows = HIT1 month, M{age} = avg ARR/seller at that cohort age. Channel ARR from card 10892
@@ -1469,7 +1506,9 @@ def main():
         'googleHitCohort': google_hit_cohort,
         'googleGoliveCohort': google_golive_cohort,
         'googleGoliveToggle': google_golive_toggle,
+        'googleHitCohortToggle': google_hit_cohort_toggle,
         'googleHitConv': google_hit_conv,
+        'googleHitConvToggle': google_hit_conv_toggle,
         'arrCohort': arr_cohort,
         'arrBuckets': arr_buckets,
         'hit2ArrSpendMom': hit2_mom_perf,
