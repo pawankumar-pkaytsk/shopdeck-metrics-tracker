@@ -650,6 +650,58 @@ def main():
             print(f"[bev] weekly 1k-5k {_kk} (card {_cid}) failed: {_e}")
     weekly_1k5k = weekly_by_hit['hit1']  # backward-compat (default view)
 
+    # Google weekly 1k-5k metrics (card 11815 "1k-5k lots of metric google") for the table above
+    # "1 · Funnel of Acceptance" in the Google tab: HIT1 / HIT2 / HIT1+HIT2 / Revenue toggle.
+    # Card 11815's own hit_sellers filter is ((team='HITS' AND good_seller IS NULL) OR hit2=1),
+    # i.e. HIT1+HIT2. We clone its SQL and swap that predicate per universe (same universe logic
+    # as the golive/hit-conversion toggles): HIT1 = HITS non-good, HIT2 = hit2=1, both = either,
+    # Revenue = non-HITS non-good non-hit2.
+    def _g_weekly_rows(rows_in):
+        out = []
+        for _r in sorted(rows_in, key=lambda x: -(int(x.get('year_week') or 0))):
+            out.append({
+                'yw': str(_r.get('year_week') or ''),
+                'total': _r.get('total'),
+                'running': _r.get('running'),
+                'notRunning': _r.get('not_running'),
+                'profitGt5': _r.get('profit_gt_5'),
+                'breakeven': _r.get('breakeven'),
+                'loss': _r.get('loss'),
+                'hitPct': _wnum(_r.get('hit_pct')),
+                'bh': _wnum(_r.get('bh')),
+                'beBh': _wnum(_r.get('be_bh')),
+                'arrBhPct': _wnum(_r.get('arr_bh_pct')),
+                'arrBeBhPct': _wnum(_r.get('arr_be_bh_pct')),
+            })
+        return out
+    google_weekly_by_hit = {'hit1': [], 'hit2': [], 'both': [], 'revenue': []}
+    try:
+        _c15 = req(f"{url}/api/card/11815", 'GET', None, H)
+        _g15st = _c15['dataset_query']['stages'][0]
+        _g15sql = _g15st['native']; _g15tt = _g15st['template-tags']
+        _g15orig = ("  WHERE ((h.team = 'HITS' \n    AND h.good_seller IS NULL) or \n"
+                    "\th.hit2=1)\n    AND (gst.total_goog_spend >= 10)")
+        if _g15orig not in _g15sql:
+            raise RuntimeError('card 11815 hit_sellers WHERE clause not found (query changed upstream)')
+        _G15UNI = {
+            'hit1': "h.team = 'HITS' AND h.good_seller IS NULL",
+            'hit2': "h.hit2 = 1",
+            'both': "(h.team = 'HITS' AND h.good_seller IS NULL) OR h.hit2 = 1",
+            'revenue': "h.good_seller IS NULL AND h.team != 'HITS' AND (h.hit2 IS NULL OR h.hit2 != 1)",
+        }
+        for _u, _pred in _G15UNI.items():
+            _sql2 = _g15sql.replace(_g15orig, "  WHERE (" + _pred + ")\n    AND (gst.total_goog_spend >= 10)")
+            _dq2 = {'database': _c15['dataset_query'].get('database', 6), 'type': 'native',
+                    'native': {'query': _sql2, 'template-tags': _g15tt}}
+            _pl2 = urllib.parse.urlencode({'query': json.dumps(_dq2)}).encode()
+            _rq2 = urllib.request.Request(f"{url}/api/dataset/json", data=_pl2, method='POST',
+                                          headers={**AUTH, 'Content-Type': 'application/x-www-form-urlencoded'})
+            _rows2 = json.loads(urllib.request.urlopen(_rq2, timeout=600).read())
+            google_weekly_by_hit[_u] = _g_weekly_rows(_rows2)
+            print(f"[bev] google weekly 1k-5k {_u} (card 11815 variant): {len(google_weekly_by_hit[_u])} weeks")
+    except Exception as _e:
+        print(f"[bev] google weekly 1k-5k (card 11815) failed: {_e}")
+
     # Google Metrics Benchmarking (card 11576): metric-wise rows, columns W0..W10.
     # 4 groups of 4 metrics for grouped line charts + adjacent numbers.
     google_wk = None
@@ -1509,6 +1561,7 @@ def main():
         'googleHitCohortToggle': google_hit_cohort_toggle,
         'googleHitConv': google_hit_conv,
         'googleHitConvToggle': google_hit_conv_toggle,
+        'googleWeeklyByHit': google_weekly_by_hit,
         'arrCohort': arr_cohort,
         'arrBuckets': arr_buckets,
         'hit2ArrSpendMom': hit2_mom_perf,
