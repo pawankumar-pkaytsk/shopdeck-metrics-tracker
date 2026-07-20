@@ -115,22 +115,35 @@ def main():
     H = {'Content-Type': 'application/json', **AUTH}
     today = datetime.date.today()
 
-    # ---- 11431: new GCs ----
+    # ---- 11431: new GCs (fall back to prior lt_data roster if the card is unavailable, e.g. BQ quota) ----
     new_gcs = []
-    for r in req(f"{url}/api/card/11431/query/json", "POST", {}, H):
-        if "growth consultant" not in _key(r.get("designation")):
-            continue
-        doj = parse_doj(r.get("doj"))
-        if not doj or doj < NEW_SINCE:
-            continue
-        iso = doj.isocalendar()
-        new_gcs.append({
-            "empId": _norm(r.get("emp_id")), "name": _norm(r.get("emp_name")),
-            "doj": doj.isoformat(), "ageDays": (today - doj).days,
-            "joinWeek": f"{iso[0]}-W{str(iso[1]).zfill(2)}", "joinMonth": doj.strftime("%Y-%m"),
-            "status": _norm(r.get("current_status")) or "Active",
-        })
-    print(f"[lt] card 11431: {len(new_gcs)} new GCs (DOJ >= {NEW_SINCE})")
+    try:
+        for r in req(f"{url}/api/card/11431/query/json", "POST", {}, H):
+            if "growth consultant" not in _key(r.get("designation")):
+                continue
+            doj = parse_doj(r.get("doj"))
+            if not doj or doj < NEW_SINCE:
+                continue
+            iso = doj.isocalendar()
+            new_gcs.append({
+                "empId": _norm(r.get("emp_id")), "name": _norm(r.get("emp_name")),
+                "doj": doj.isoformat(), "ageDays": (today - doj).days,
+                "joinWeek": f"{iso[0]}-W{str(iso[1]).zfill(2)}", "joinMonth": doj.strftime("%Y-%m"),
+                "status": _norm(r.get("current_status")) or "Active",
+            })
+        print(f"[lt] card 11431: {len(new_gcs)} new GCs (DOJ >= {NEW_SINCE})")
+    except Exception as _e:
+        for g in (load_json("lt_data.json", {}) or {}).get("gcs", []):
+            doj = parse_doj(g.get("doj"))
+            iso = doj.isocalendar() if doj else (0, 0, 0)
+            new_gcs.append({
+                "empId": _norm(g.get("empId")), "name": _norm(g.get("name")),
+                "doj": g.get("doj") or "", "ageDays": ((today - doj).days if doj else g.get("ageDays")),
+                "joinWeek": g.get("joinWeek") or (f"{iso[0]}-W{str(iso[1]).zfill(2)}" if doj else ""),
+                "joinMonth": g.get("joinMonth") or (doj.strftime("%Y-%m") if doj else ""),
+                "status": g.get("status") or "Active",
+            })
+        print(f"[lt] card 11431 failed ({str(_e)[:60]}); reused {len(new_gcs)} GCs from prior lt_data")
 
     # ---- local data ----
     gc_data = load_json("gc_data.json", {}) or {}
@@ -153,7 +166,12 @@ def main():
             if sid:
                 life_spend[sid] += num(r.get("lifetime_spend"))
     except Exception as _e:
-        print("[lt] card 2787 lifetime spend fetch failed (spend will show 0):", str(_e)[:120])
+        # fall back to cached per-seller lifetime spend already stored in gc_detail_data (spend.life)
+        for sid, dd in detail.items():
+            lv = ((dd.get("spend") or {}).get("life"))
+            if lv:
+                life_spend[str(sid)] = num(lv)
+        print("[lt] card 2787 failed (%s); using cached gc_detail spend.life for %d sellers" % (str(_e)[:50], len(life_spend)))
 
     # ---- golive POC = GC assigned at a seller's golive date (assignment changelog, card 10992) ----
     _gc_ivals = defaultdict(list)  # sid -> [records]
@@ -183,14 +201,17 @@ def main():
                       key=lambda x: _cdt(x["end_date"]))
         return (_norm(prev[-1].get("name")) or None) if prev else None
 
-    # HIT targets per GC per month (11322)
+    # HIT targets per GC per month (11322) — tolerate fetch failure (targets show null)
     tgt = defaultdict(dict)  # gc_key -> 'YYYY-MM' -> target
-    for r in req(f"{url}/api/card/11322/query/json", "POST", {}, H):
-        if str(r.get("Role") or "").strip().upper() != "GC":
-            continue
-        nm, mth, yr = _key(r.get("Name")), r.get("Target_Month"), r.get("Target_Year")
-        if nm and mth is not None and yr is not None and r.get("HITS_Target") is not None:
-            tgt[nm][f"{int(yr)}-{str(int(mth)).zfill(2)}"] = num(r.get("HITS_Target"))
+    try:
+        for r in req(f"{url}/api/card/11322/query/json", "POST", {}, H):
+            if str(r.get("Role") or "").strip().upper() != "GC":
+                continue
+            nm, mth, yr = _key(r.get("Name")), r.get("Target_Month"), r.get("Target_Year")
+            if nm and mth is not None and yr is not None and r.get("HITS_Target") is not None:
+                tgt[nm][f"{int(yr)}-{str(int(mth)).zfill(2)}"] = num(r.get("HITS_Target"))
+    except Exception as _e:
+        print("[lt] card 11322 HITS targets fetch failed (targets show null):", str(_e)[:80])
 
     # sellers per GC + hit1 achieved per GC per month (via current 7753 assignment in gc_data)
     hit1_by_sid = defaultdict(list)
