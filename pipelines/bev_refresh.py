@@ -318,6 +318,8 @@ def main():
         sid = str(r.get('seller_id') or '').strip()
         if not sid or sid in COHORT_EXCLUDE:
             continue
+        if str(r.get('good_seller')).strip() in ('1', '1.0', 'True', 'true'):
+            continue  # good sellers are not part of the 1k-5k cohort (excluded like `sids`)
         is_hits = str(r.get('team') or '').strip().upper() == 'HITS' or str(r.get('hit2')).strip() in ('1', '1.0', 'True', 'true')
         hm, hy = r.get('hit_month'), r.get('hit_year')
         if not is_hits or hm is None or hy is None:
@@ -541,6 +543,8 @@ def main():
         for r in hitrows:
             if str(r.get('hit2')).strip() not in ('1', '1.0', 'True', 'true'):
                 continue
+            if str(r.get('good_seller')).strip() in ('1', '1.0', 'True', 'true'):
+                continue  # exclude good sellers from 1k-5k HIT2 credit
             try:
                 if int(r.get('hit2_year')) != ry or int(r.get('hit2_month')) != rm:
                     continue
