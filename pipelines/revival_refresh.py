@@ -42,9 +42,11 @@ def req(url, method="GET", body=None, H=None):
     raise last
 
 
-_ISO_FMTS = ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d",
-             "%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y",
-             "%d-%m-%Y", "%b %d, %Y", "%d %b %Y", "%Y/%m/%d")
+# card 11911 timestamp looks like "May 22, 2026, 06:01:23"; keep other common shapes too.
+_FMTS = ("%b %d, %Y, %H:%M:%S", "%b %d, %Y %H:%M:%S", "%b %d, %Y",
+         "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d",
+         "%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y",
+         "%d-%m-%Y", "%d %b %Y", "%Y/%m/%d")
 
 
 def parse_date(v):
@@ -52,23 +54,21 @@ def parse_date(v):
     s = str(v or "").strip()
     if not s:
         return None
-    # epoch seconds / millis (Slack ts can be like 1710...)
+    for fmt in _FMTS:  # full-string strptime (strptime is lenient about single-digit day)
+        try:
+            return datetime.datetime.strptime(s, fmt).date()
+        except (ValueError, TypeError):
+            continue
     if re.fullmatch(r"\d{13}", s):
         try: return datetime.datetime.utcfromtimestamp(int(s) / 1000).date()
         except (ValueError, OSError): pass
     if re.fullmatch(r"\d{10}(\.\d+)?", s):
         try: return datetime.datetime.utcfromtimestamp(float(s)).date()
         except (ValueError, OSError): pass
-    # ISO fast path
     try:
         return datetime.date.fromisoformat(s[:10])
     except ValueError:
         pass
-    for fmt in _ISO_FMTS:
-        try:
-            return datetime.datetime.strptime(s[:len(datetime.datetime.now().strftime(fmt)) + 4], fmt).date()
-        except (ValueError, TypeError):
-            continue
     m = re.search(r"(\d{4})-(\d{2})-(\d{2})", s)
     if m:
         try: return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
@@ -103,16 +103,26 @@ def main():
         AUTH = {"X-Metabase-Session": tok}
     H = {"Content-Type": "application/json", **AUTH}
 
+    # The API-key path forces a fresh BigQuery run (db 23 is quota-limited); a session request
+    # returns Metabase's cached result, so on failure retry once with a session token.
     try:
         raw = req(f"{url}/api/card/{CARD}/query/json", "POST", {}, H)
-    except Exception as e:
-        prev = load_prev()
-        if prev:
-            print(f"[revival] card {CARD} fetch failed ({str(e)[:80]}); preserving previous revival_data.json")
-            return
-        # no prior data: write an empty-but-valid file so the UI shows a graceful message
-        raw = []
-        print(f"[revival] card {CARD} fetch failed ({str(e)[:80]}); writing empty revival_data.json")
+    except Exception as e1:
+        raw = None
+        if email and pw:
+            try:
+                tok = req(url + "/api/session", "POST", {"username": email, "password": pw}, {"Content-Type": "application/json"})["id"]
+                raw = req(f"{url}/api/card/{CARD}/query/json", "POST", {}, {"X-Metabase-Session": tok, "Content-Type": "application/json"})
+                print(f"[revival] api-key fetch failed ({str(e1)[:50]}); used session (cached) result")
+            except Exception as e2:
+                print(f"[revival] session fetch also failed ({str(e2)[:60]})")
+        if raw is None:
+            prev = load_prev()
+            if prev and prev.get("rows"):
+                print(f"[revival] card {CARD} unavailable; preserving previous revival_data.json")
+                return
+            raw = []
+            print(f"[revival] card {CARD} unavailable and no prior data; writing empty revival_data.json")
 
     rows, unparsed = [], 0
     dbg = []
@@ -127,7 +137,7 @@ def main():
         iso = d.isocalendar()
         rows.append({
             "s": str(r.get("seller_id") or ""), "n": str(r.get("seller_name") or ""),
-            "poc": (str(r.get("submitted_by") or "").strip() or "Unknown"),
+            "poc": (re.sub(r"\s+", " ", str(r.get("submitted_by") or "").strip()).title() or "Unknown"),
             "d": d.isoformat(), "yw": "%d%02d" % (iso[0], iso[1]),
             "funds": round(_num(r.get("funds_added_amount_in_rupees"))),
         })
