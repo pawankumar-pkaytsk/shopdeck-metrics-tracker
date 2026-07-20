@@ -118,9 +118,16 @@ def main():
     week_rows = _emit(week_acc, "yw", lambda k: str(k))
 
     # --- Yesterday movement with PREVIOUS GC/GM mapping (card 10992 changelog) ---
-    # "yesterday" = the calendar day before the refresh runs (created_at is naive IST).
-    yday = (datetime.datetime.utcnow() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-    y_rows = [r for r in rows if str(r.get("created_at"))[:10] == yday and _cat(r.get("title"))]
+    # "yesterday" = the calendar day before the refresh runs (created_at is naive IST). On Monday it
+    # rolls up the weekend (Saturday + Sunday) so the Monday view combines both non-working days.
+    _now = datetime.datetime.utcnow()
+    if _now.weekday() == 0:   # Monday -> Saturday + Sunday
+        ydays = [(_now - datetime.timedelta(days=2)).strftime("%Y-%m-%d"),
+                 (_now - datetime.timedelta(days=1)).strftime("%Y-%m-%d")]
+    else:
+        ydays = [(_now - datetime.timedelta(days=1)).strftime("%Y-%m-%d")]
+    yday = ydays[0] if len(ydays) == 1 else (ydays[0] + " – " + ydays[-1])   # label
+    y_rows = [r for r in rows if str(r.get("created_at"))[:10] in ydays and _cat(r.get("title"))]
 
     # Mapping = the GC/GM the seller had BEFORE they were moved into the revival/hypercare team.
     # Card 7753 (current mapping) collapses everyone onto the hypercare GM post-move, so instead we
@@ -193,6 +200,7 @@ def main():
 
     yesterday = {
         "date": yday,
+        "dates": ydays,
         "gm": y_gm,
         "gcgm": y_gcgm,
         "totals": _row({cat: sum(v.get(cat, 0) for v in gm_acc.values()) for cat in CATS}),
