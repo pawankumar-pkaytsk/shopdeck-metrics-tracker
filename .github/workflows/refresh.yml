@@ -98,6 +98,9 @@ jobs:
       - name: Hypercare Movement (card 9353)
         continue-on-error: true
         run: python pipelines/hypercare_movement_refresh.py
+      - name: Revival Log (card 11911)
+        continue-on-error: true
+        run: python pipelines/revival_refresh.py
 
       - name: Snapshot (dated, compressed archive for time-travel)
         continue-on-error: true
