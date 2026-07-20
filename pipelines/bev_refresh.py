@@ -463,14 +463,17 @@ def main():
     # ---- per-GL Google qualifiers (1k-5k accounts / live-google / google-spending), from scaling ----
     _ceil = lambda x: int(x) + (1 if x > int(x) else 0)
     gl_goog = {}
+    gc_meta_sids, gc_goog_sids = {}, {}   # gc -> assigned sids / google-live sids (for SL drilldown)
     for sid in sids:
         gl = smap.get(sid, {}).get('gc', 'Unassigned')
         if gl not in gls:
             continue
         t = rec(sid); d = gl_goog.setdefault(gl, {'acc': 0, 'glive': 0, 'gspend': 0})
         d['acc'] += 1
+        gc_meta_sids.setdefault(gl, []).append(sid)
         if str(t.get('ga') or '') and fnum(t.get('gt')) > 1:
             d['glive'] += 1
+            gc_goog_sids.setdefault(gl, []).append(sid)
         if fnum(t.get('gy')) > 50:
             d['gspend'] += 1
 
@@ -501,16 +504,18 @@ def main():
         pref = '%d-%02d' % (int(ym[:4]), int(ym[4:]))
         mdays = [d for d in good_dates if d[:7] == pref]
         m_sp, g_sp = {}, {}   # gc -> Σ over days of (# sellers spending that day)
+        m_sid, g_sid = {}, {}  # sid -> # days that seller spent (meta / google)
         for d in mdays:
             for row in perf_by_date.get(d, {}).get('rows', []):
                 g = smap.get(row[0], {}).get('gc')
                 if g not in gls:
                     continue
                 if row[2] > 0:
-                    m_sp[g] = m_sp.get(g, 0) + 1
+                    m_sp[g] = m_sp.get(g, 0) + 1; m_sid[row[0]] = m_sid.get(row[0], 0) + 1
                 if row[4] > 0:
-                    g_sp[g] = g_sp.get(g, 0) + 1
-        return {'nd': len(mdays), 'metaSpendDays': m_sp, 'googSpendDays': g_sp}
+                    g_sp[g] = g_sp.get(g, 0) + 1; g_sid[row[0]] = g_sid.get(row[0], 0) + 1
+        return {'nd': len(mdays), 'metaSpendDays': m_sp, 'googSpendDays': g_sp,
+                'metaBySid': m_sid, 'googBySid': g_sid}
 
     def compute_tva(ym):
         ry, rm = int(ym[:4]), int(ym[4:])
@@ -559,27 +564,43 @@ def main():
             return {'name': name, 'hit2T': h2t_v, 'hit2A': h2a_v, 'arrT': aT, 'arrA': aA,
                     'delta': max(0, round(0.85 * aT - aA)), 'n': nrec,
                     'hit2Ok': hit2_ok, 'arrOk': arr_ok, 'qualified': hit2_ok and arr_ok}
-        def daywise_fields(name, metaLive, googLive):
-            m = dsl['metaSpendDays'].get(name, 0); g = dsl['googSpendDays'].get(name, 0)
+        def _sl_det(sid_list):
+            out = []
+            for sid in sid_list:
+                md = dsl['metaBySid'].get(sid, 0); gd = dsl['googBySid'].get(sid, 0)
+                out.append({'s': sid, 'n': name_by_s.get(sid, '') or team.get(sid, {}).get('n', ''),
+                            'md': md, 'gd': gd,
+                            'mPct': round(md / nd * 100) if nd else 0, 'gPct': round(gd / nd * 100) if nd else 0})
+            return out
+
+        def daywise_fields(metaSids, googSids, metaLive, googLive):
+            m = sum(dsl['metaBySid'].get(s, 0) for s in metaSids)
+            g = sum(dsl['googBySid'].get(s, 0) for s in googSids)
             metaPct = round(m / (nd * metaLive) * 100, 1) if (nd and metaLive) else None
             googPct = round(g / (nd * googLive) * 100, 1) if (nd and googLive) else None
-            return {'metaSLPct': metaPct, 'gSLPctDW': googPct, 'slDays': nd}
+            return {'metaSLPct': metaPct, 'gSLPctDW': googPct, 'slDays': nd,
+                    'metaSLDet': sorted(_sl_det(metaSids), key=lambda x: -x['md']),
+                    'gSLDet': sorted(_sl_det(googSids), key=lambda x: -x['gd'])}
 
         gl_rows = [mkrow(g, arrT.get(g, 0), arrA.get(g, 0), h2t.get(g), h2A.get(g, 0), len(det.get(g, []))) for g in gls]
         for row in gl_rows:
             gg = gl_goog.get(row['name'], {'acc': 0, 'glive': 0, 'gspend': 0})
             row.update(goog_fields(gg['acc'], gg['glive'], gg['gspend']))
-            row.update(daywise_fields(row['name'], assigned_by_gc.get(row['name'], 0), gg['glive']))
+            row.update(daywise_fields(gc_meta_sids.get(row['name'], []), gc_goog_sids.get(row['name'], []),
+                                      assigned_by_gc.get(row['name'], 0), gg['glive']))
         gl_detail = {g: sorted(det.get(g, []), key=lambda x: -x['arr']) for g in gls}
         gl_hit2 = {g: h2det.get(g, []) for g in gls}
         # GM rollup
         gT, gA, gh2T, gh2A, gdet, ghit2 = {}, {}, {}, {}, {}, {}
         gGoog = {}
         gAssigned, gMetaSD, gGoogSD = {}, {}, {}
+        gMetaSids, gGoogSids = {}, {}
         for g in gls:
             gm = gc2gm_all.get(g) or 'Unassigned'
             if gm == 'Unassigned':
                 continue
+            gMetaSids.setdefault(gm, []).extend(gc_meta_sids.get(g, []))
+            gGoogSids.setdefault(gm, []).extend(gc_goog_sids.get(g, []))
             gT[gm] = gT.get(gm, 0) + arrT.get(g, 0)
             gA[gm] = gA.get(gm, 0) + arrA.get(g, 0)
             gh2A[gm] = gh2A.get(gm, 0) + h2A.get(g, 0)
@@ -601,6 +622,8 @@ def main():
             row['metaSLPct'] = round(gMetaSD.get(nm, 0) / (nd * mL) * 100, 1) if (nd and mL) else None
             row['gSLPctDW'] = round(gGoogSD.get(nm, 0) / (nd * gL) * 100, 1) if (nd and gL) else None
             row['slDays'] = nd
+            row['metaSLDet'] = sorted(_sl_det(gMetaSids.get(nm, [])), key=lambda x: -x['md'])
+            row['gSLDet'] = sorted(_sl_det(gGoogSids.get(nm, [])), key=lambda x: -x['gd'])
         gm_detail = {gm: sorted(gdet.get(gm, []), key=lambda x: -x['arr']) for gm in gms}
         gm_hit2 = {gm: ghit2.get(gm, []) for gm in gms}
         return {'byGL': {'rows': gl_rows, 'detail': gl_detail, 'hit2': gl_hit2},
@@ -692,36 +715,40 @@ def main():
     #  are not gated in this figure; Spend/Live uses the day-wise weighted average.)
     def incentive_pct(row):
         h2t, h2a = row.get('hit2T'), row.get('hit2A') or 0
-        if not h2t:
-            return {'pct': 0, 'reason': 'no HIT2 target'}
-        r = h2a / h2t
-        base = 25 if r >= 1 else (15 if r >= 0.5 else 0)
-        if base == 0:
-            return {'pct': 0, 'reason': 'HITS < 50% of target'}
         aT, aA = row.get('arrT') or 0, row.get('arrA') or 0
-        if not aT or aA < 0.85 * aT:
-            return {'pct': 0, 'reason': 'ARR < 85% of target'}
-        ar = aA / aT
-        arrMult = 2.0 if ar >= 2 else (1.25 if ar >= 1.5 else 1.0)
         ch = row.get('churn') or 0
+        mSL, gSL, gGo = row.get('metaSLPct'), row.get('gSLPctDW'), row.get('gGolivePct')
+        rr = (h2a / h2t) if h2t else 0
+        base = 25 if (h2t and rr >= 1) else (15 if (h2t and rr >= 0.5) else 0)
+        arr_ratio = (aA / aT) if aT else 0
+        arr_ok = bool(aT) and aA >= 0.85 * aT
+        arrMult = 2.0 if arr_ratio >= 2 else (1.25 if arr_ratio >= 1.5 else 1.0)
         churnMult = 1.0 if ch == 0 else (0.5 if ch == 1 else 0.0)
-        if churnMult == 0:
-            return {'pct': 0, 'reason': '2+ churns'}
-        mSL = row.get('metaSLPct')
-        if mSL is None or mSL < 60:
-            return {'pct': 0, 'reason': 'Meta Spend/Live < 60%'}
-        metaMult = 1.25 if mSL > 80 else 1.0
-        gSL = row.get('gSLPctDW')
-        if gSL is None or gSL < 65:
-            return {'pct': 0, 'reason': 'Google Spend/Live < 65%'}
-        googMult = 1.2 if gSL > 75 else 1.0
-        gGo = row.get('gGolivePct')
-        if gGo is None or gGo < 50:
-            return {'pct': 0, 'reason': 'Google Golives < 50%'}
-        goliveMult = 1.25 if gGo > 65 else 1.0
-        pct = round(base * arrMult * churnMult * metaMult * googMult * goliveMult, 2)
-        return {'pct': pct, 'reason': 'base %d%% x ARR %.2fx x churn %.1fx x metaSL %.2fx x gSL %.1fx x golive %.2fx'
-                % (base, arrMult, churnMult, metaMult, googMult, goliveMult)}
+        meta_ok = (mSL is not None and mSL >= 60)
+        metaMult = 1.25 if (mSL is not None and mSL > 80) else 1.0
+        goog_ok = (gSL is not None and gSL >= 65)
+        googMult = 1.2 if (gSL is not None and gSL > 75) else 1.0
+        golive_ok = (gGo is not None and gGo >= 50)
+        goliveMult = 1.25 if (gGo is not None and gGo > 65) else 1.0
+        fail = (base == 0) or (not arr_ok) or (churnMult == 0) or (not meta_ok) or (not goog_ok) or (not golive_ok)
+        pct = 0.0 if fail else round(base * arrMult * churnMult * metaMult * googMult * goliveMult, 2)
+        steps = [
+            {'factor': 'HITS base pool', 'value': '%d%%' % base,
+             'note': 'HIT2 %d/%s = %d%% of target (≥100%%→25, 50–99%%→15, <50%%→0)' % (h2a, h2t if h2t else '—', round(rr * 100))},
+            {'factor': 'ARR qualifier + multiplier', 'value': ('%.2fx' % arrMult) if arr_ok else '0 · fails ≥85% gate',
+             'note': 'ARR %s / %s = %d%% of target' % ('{:,}'.format(round(aA)), '{:,}'.format(round(aT)), round(arr_ratio * 100))},
+            {'factor': 'Churn', 'value': ('%.1fx' % churnMult) if ch < 2 else '0 · 2+ churns',
+             'note': '%d churns (0→1x, 1→0.5x, 2+→0)' % ch},
+            {'factor': 'Meta Spend/Live', 'value': ('%.2fx' % metaMult) if meta_ok else '0 · <60%',
+             'note': ('%.1f%%' % mSL if mSL is not None else '—') + ' (<60→0, 60–80→1x, >80→1.25x)'},
+            {'factor': 'Google Spend/Live', 'value': ('%.2fx' % googMult) if goog_ok else '0 · <65%',
+             'note': ('%.1f%%' % gSL if gSL is not None else '—') + ' (<65→0, 65–75→1x, >75→1.2x)'},
+            {'factor': 'Google Golives', 'value': ('%.2fx' % goliveMult) if golive_ok else '0 · <50%',
+             'note': ('%.1f%%' % gGo if gGo is not None else '—') + ' (<50→0, 50–65→1x, >65→1.25x)'},
+            {'factor': 'Final incentive', 'value': '%.2f%%' % pct,
+             'note': 'product of factors above; 0 if any gate fails'},
+        ]
+        return {'pct': pct, 'steps': steps}
 
     for ym, tva_data in by_month.items():
         for row in tva_data['byGL']['rows']:
@@ -732,15 +759,17 @@ def main():
         # GL incentive from that GL's own metrics
         for row in tva_data['byGL']['rows']:
             inc = incentive_pct(row)
-            row['incentive'] = inc['pct']; row['incentiveReason'] = inc['reason']
+            row['incentive'] = inc['pct']; row['incentiveSteps'] = inc['steps']
         # GM incentive is an absolute of its GLs: GM = 1/5 x Σ(GL incentives under that GM)
         gl_inc = {row['name']: (row.get('incentive') or 0) for row in tva_data['byGL']['rows']}
         for row in tva_data['byGM']['rows']:
             subs = [g for g in gls if gc2gm_all.get(g) == row['name']]
             s = sum(gl_inc.get(g, 0) for g in subs)
             row['incentive'] = round(s / 5.0, 2)
-            parts = ', '.join('%s %s%%' % (g, gl_inc.get(g, 0)) for g in subs if gl_inc.get(g, 0))
-            row['incentiveReason'] = '1/5 x Σ GL incentives = (%s) / 5 = %.2f%%' % (parts or '0', row['incentive'])
+            steps = [{'factor': g, 'value': '%.2f%%' % gl_inc.get(g, 0), 'note': 'GL under this GM'} for g in subs]
+            steps.append({'factor': 'Sum of GL incentives', 'value': '%.2f%%' % s, 'note': '%d GLs' % len(subs)})
+            steps.append({'factor': 'GM incentive = Σ ÷ 5', 'value': '%.2f%%' % row['incentive'], 'note': 'GM is 1/5 of its GLs'})
+            row['incentiveSteps'] = steps
 
     # Weekly 1k-5k metrics for the table under ARR Cohort (1k-5k): HIT1 / HIT2 / HIT1+HIT2 toggle.
     # HIT1 = card 11115, HIT2 = card 11727, HIT1+HIT2 = card 11740 (identical column schema).
