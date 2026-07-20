@@ -729,9 +729,18 @@ def main():
         for row in tva_data['byGM']['rows']:
             cnt = sum(len(churned_tva_by_gl.get(g, [])) for g in gls if gc2gm_all.get(g) == row['name'])
             row['churn'] = cnt
-        for row in tva_data['byGL']['rows'] + tva_data['byGM']['rows']:
+        # GL incentive from that GL's own metrics
+        for row in tva_data['byGL']['rows']:
             inc = incentive_pct(row)
             row['incentive'] = inc['pct']; row['incentiveReason'] = inc['reason']
+        # GM incentive is an absolute of its GLs: GM = 1/5 x Σ(GL incentives under that GM)
+        gl_inc = {row['name']: (row.get('incentive') or 0) for row in tva_data['byGL']['rows']}
+        for row in tva_data['byGM']['rows']:
+            subs = [g for g in gls if gc2gm_all.get(g) == row['name']]
+            s = sum(gl_inc.get(g, 0) for g in subs)
+            row['incentive'] = round(s / 5.0, 2)
+            parts = ', '.join('%s %s%%' % (g, gl_inc.get(g, 0)) for g in subs if gl_inc.get(g, 0))
+            row['incentiveReason'] = '1/5 x Σ GL incentives = (%s) / 5 = %.2f%%' % (parts or '0', row['incentive'])
 
     # Weekly 1k-5k metrics for the table under ARR Cohort (1k-5k): HIT1 / HIT2 / HIT1+HIT2 toggle.
     # HIT1 = card 11115, HIT2 = card 11727, HIT1+HIT2 = card 11740 (identical column schema).
