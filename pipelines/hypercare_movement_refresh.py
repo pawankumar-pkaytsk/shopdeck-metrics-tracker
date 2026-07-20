@@ -132,9 +132,16 @@ def main():
         except Exception: return None
 
     chlog = {}   # seller_id -> list of records
+    curmap = {}  # seller_id -> {gc, gm} from current mapping (card 7753), used as fallback
     if y_rows:
         for cr in req(f"{url}/api/card/{CHANGELOG_CARD}/query/json", "POST", {}, H):
             chlog.setdefault(str(cr.get("seller_id") or ""), []).append(cr)
+        _clean = lambda v: (str(v).strip() if v not in (None, "", "-") else None)
+        for mr in req(f"{url}/api/card/7753/query/json", "POST", {}, H):
+            sid = str(mr.get("seller_id") or "")
+            if sid:
+                curmap[sid] = {"gc": _clean(mr.get("growth_consultant_name")),
+                               "gm": _clean(mr.get("growth_manager_name"))}
 
     def _prev_gc_gm(sid, ca):
         recs = chlog.get(sid, [])
@@ -158,8 +165,11 @@ def main():
         cat = _cat(r.get("title"))
         sid = str(r.get("seller_id") or "")
         gc, gm = _prev_gc_gm(sid, _dt(r.get("created_at")))
-        gm = gm or UNK
-        gc = gc or UNK
+        # Fallback for sellers absent from the changelog (e.g. assigned after the 1-Jan dump):
+        # use their current mapping (card 7753) so a real GM/GC still shows instead of "Unknown".
+        cur = curmap.get(sid) or {}
+        gm = gm or cur.get("gm") or UNK
+        gc = gc or cur.get("gc") or UNK
         if gm == UNK:
             y_unmapped += 1
         gm_acc.setdefault(gm, {}).setdefault(cat, 0)
