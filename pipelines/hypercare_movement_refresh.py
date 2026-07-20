@@ -165,20 +165,20 @@ def main():
             return nm or None
         return prev("GC"), prev("GM")
 
-    UNK = "Unknown"
     gm_acc, gcgm_acc = {}, {}
-    y_unmapped = 0
+    y_excluded = 0
     for r in y_rows:
         cat = _cat(r.get("title"))
         sid = str(r.get("seller_id") or "")
         gc, gm = _prev_gc_gm(sid, _dt(r.get("created_at")))
         # Fallback for sellers absent from the changelog (e.g. assigned after the 1-Jan dump):
-        # use their current mapping (card 7753) so a real GM/GC still shows instead of "Unknown".
+        # use their current mapping (card 7753). If STILL unresolved, drop the seller from the report.
         cur = curmap.get(sid) or {}
-        gm = gm or cur.get("gm") or UNK
-        gc = gc or cur.get("gc") or UNK
-        if gm == UNK:
-            y_unmapped += 1
+        gm = gm or cur.get("gm")
+        gc = gc or cur.get("gc")
+        if not gm or not gc:
+            y_excluded += 1
+            continue
         gm_acc.setdefault(gm, {}).setdefault(cat, 0)
         gm_acc[gm][cat] += 1
         gcgm_acc.setdefault((gm, gc), {}).setdefault(cat, 0)
@@ -192,22 +192,23 @@ def main():
         return row
 
     y_gm = []
-    for gm in sorted(gm_acc, key=lambda g: (g == UNK, -sum(gm_acc[g].values()))):
+    for gm in sorted(gm_acc, key=lambda g: -sum(gm_acc[g].values())):
         y_gm.append({"gm": gm, **_row(gm_acc[gm])})
     y_gcgm = []
-    for (gm, gc) in sorted(gcgm_acc, key=lambda t: (t[0] == UNK, t[0], -sum(gcgm_acc[t].values()))):
+    for (gm, gc) in sorted(gcgm_acc, key=lambda t: (t[0], -sum(gcgm_acc[t].values()))):
         y_gcgm.append({"gm": gm, "gc": gc, **_row(gcgm_acc[(gm, gc)])})
 
+    mapped = len(y_rows) - y_excluded
     yesterday = {
         "date": yday,
         "dates": ydays,
         "gm": y_gm,
         "gcgm": y_gcgm,
         "totals": _row({cat: sum(v.get(cat, 0) for v in gm_acc.values()) for cat in CATS}),
-        "unmapped": y_unmapped,
-        "tasks": len(y_rows),
+        "excluded": y_excluded,
+        "tasks": mapped,
     }
-    print(f"[hypercare-mvmt] yesterday {yday}: {len(y_rows)} tasks · {len(y_gm)} GMs · {y_unmapped} unmapped")
+    print(f"[hypercare-mvmt] yesterday {yday}: {mapped} mapped tasks · {len(y_gm)} GMs · {y_excluded} excluded (unmapped)")
 
     out = {
         "generatedAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
