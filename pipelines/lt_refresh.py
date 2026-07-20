@@ -143,6 +143,46 @@ def main():
     tasks = (load_json("task_data.json", {}) or {}).get("tasks", [])
     task_window_cutoff = (load_json("task_data.json", {}) or {}).get("cutoff", "")
 
+    # ---- lifetime spend per seller (card 2787, summed across ad accounts) ----
+    # Heavy BigQuery scans; on quota/rate failure degrade gracefully (spend 0 / POC blank) rather
+    # than crash the whole L&T refresh.
+    life_spend = defaultdict(float)
+    try:
+        for r in req(f"{url}/api/card/2787/query/json", "POST", {}, H):
+            sid = str(r.get("seller_id") or "").strip()
+            if sid:
+                life_spend[sid] += num(r.get("lifetime_spend"))
+    except Exception as _e:
+        print("[lt] card 2787 lifetime spend fetch failed (spend will show 0):", str(_e)[:120])
+
+    # ---- golive POC = GC assigned at a seller's golive date (assignment changelog, card 10992) ----
+    _gc_ivals = defaultdict(list)  # sid -> [records]
+    try:
+        for cr in req(f"{url}/api/card/10992/query/json", "POST", {}, H):
+            if cr.get("assignee") == "GC":
+                _gc_ivals[str(cr.get("seller_id") or "")].append(cr)
+    except Exception as _e:
+        print("[lt] card 10992 changelog fetch failed (golive POC will show —):", str(_e)[:120])
+
+    def _cdt(d):
+        try:
+            return datetime.datetime.fromisoformat(str(d)[:19])
+        except (ValueError, TypeError):
+            return None
+
+    def golive_poc(sid, gdate):
+        recs = _gc_ivals.get(sid, [])
+        ts = _cdt(gdate)
+        if not recs or ts is None:
+            return None
+        act = [x for x in recs if _cdt(x.get("start_date")) and _cdt(x["start_date"]) <= ts
+               and (not x.get("end_date") or (_cdt(x["end_date"]) and _cdt(x["end_date"]) >= ts))]
+        if act:
+            return _norm(act[-1].get("name")) or None
+        prev = sorted([x for x in recs if _cdt(x.get("end_date")) and _cdt(x["end_date"]) <= ts],
+                      key=lambda x: _cdt(x["end_date"]))
+        return (_norm(prev[-1].get("name")) or None) if prev else None
+
     # HIT targets per GC per month (11322)
     tgt = defaultdict(dict)  # gc_key -> 'YYYY-MM' -> target
     for r in req(f"{url}/api/card/11322/query/json", "POST", {}, H):
@@ -288,6 +328,66 @@ def main():
             "hitsTarget": bm.get("hitsTarget"), "hitsAch": bm.get("hitsAch", 0),
         }
     weekly["weeks"][cur_yw] = snap
+
+    # ---- Backfill derivable history: golives per ISO week (and task/callback where task_data reaches).
+    # Snapshot-only metrics (spend/live, live/assigned, bucket health, HITS target) have no per-week
+    # source, so they stay null for backfilled weeks; the UI renders them as "—".
+    def _sla_of(lst):
+        done = [t for t in lst if str(t.get("status") or "").lower() in ("completed", "closed")]
+        sla = sum(1 for t in done if t.get("tat") is not None and t.get("sla") is not None and t["tat"] <= t["sla"])
+        return {"tot": len(lst), "done": len(done), "sla": sla}
+    _gc_sids = {}
+    for g in out_gcs:
+        if g.get("matched"):
+            canon = gc_key.get(_key(g["name"]))
+            _gc_sids[g["empId"] or _key(g["name"])] = [s["id"] for s in by_gc.get(canon, {}).get("sellers", [])] if canon else []
+    # floor the backfill at NEW_SINCE (Jan 2026), matching the Month-Wise range — these are new GCs,
+    # so pre-2026 golives of their current book aren't relevant history.
+    _wk_floor = "%d%02d" % (NEW_SINCE.isocalendar()[0], NEW_SINCE.isocalendar()[1])
+    all_gwks = set()
+    for sids in _gc_sids.values():
+        for sid in sids:
+            w = _wk_of((golive.get(sid) or {}).get("g"))
+            if w and _wk_floor <= w <= cur_yw:
+                all_gwks.add(w)
+    for yw in sorted(all_gwks):
+        if yw in weekly["weeks"]:
+            continue   # keep real (richer) snapshots
+        bsnap = {}
+        for g in out_gcs:
+            if not g.get("matched"):
+                continue
+            k = _key(g["name"]); pk = g["empId"] or k; sids = _gc_sids.get(pk, [])
+            golw = sum(1 for sid in sids if _wk_of((golive.get(sid) or {}).get("g")) == yw)
+            gts = [t for t in t_by_gc.get(k, []) if _wk_of(t.get("cr")) == yw]
+            if not golw and not gts:
+                continue
+            reg = [t for t in gts if str(t.get("ty") or "").lower() != "callback"]
+            cbs = [t for t in gts if str(t.get("ty") or "").lower() == "callback"]
+            bsnap[pk] = {
+                "name": g["name"], "empId": g["empId"], "doj": g["doj"],
+                "assigned": None, "live": None, "spending": None,
+                "spendLivePct": None, "liveAssignedPct": None, "bucketHealthPct": None,
+                "task": _sla_of(reg) if gts else None, "callback": _sla_of(cbs) if gts else None,
+                "golives": golw, "hitsTarget": None, "hitsAch": None, "backfill": True,
+            }
+        if bsnap:
+            weekly["weeks"][yw] = bsnap
+
+    # ---- GC details: for each new GC, their current sellers with lifetime spend, golive date & golive-POC
+    gc_details = {}
+    for g in out_gcs:
+        if not g.get("matched"):
+            continue
+        k = _key(g["name"]); canon = gc_key.get(k); pk = g["empId"] or k
+        rows = []
+        for s in by_gc.get(canon, {}).get("sellers", []):
+            sid = s["id"]; gdate = (golive.get(sid) or {}).get("g") or ""
+            rows.append({"s": sid, "n": s.get("name", ""), "spend": round(life_spend.get(sid, 0)),
+                         "golive": gdate, "poc": golive_poc(sid, gdate) or "—"})
+        rows.sort(key=lambda x: -x["spend"])
+        gc_details[pk] = rows
+
     weekly["generatedAt"] = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     json.dump(weekly, open(os.path.join(REPO, "lt_weekly.json"), "w"), separators=(",", ":"))
     print(f"[lt] weekly snapshot {cur_yw}: {len(snap)} GCs · total weeks stored={len(weekly['weeks'])}")
@@ -298,6 +398,7 @@ def main():
         "taskWindowCutoff": task_window_cutoff,
         "months": months,
         "gcs": out_gcs,
+        "gcDetails": gc_details,
     }
     json.dump(out, open(OUT, "w"), separators=(",", ":"))
     matched = sum(1 for x in out_gcs if x["matched"])
