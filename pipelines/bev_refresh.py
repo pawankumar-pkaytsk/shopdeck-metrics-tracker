@@ -431,6 +431,35 @@ def main():
     frozen_arr = {sid: round(v[1]) for sid, v in frozen_arr.items()}
     print(f"[tva] frozen ARR at conversion Friday for {len(frozen_arr)} HIT2 sellers")
 
+    # ---- HIT2 attribution via the assignment changelog (card 10992) ----
+    # Current mapping (card 7753) is blank/stale for HIT2 sellers post-move, so HIT2 Achieved showed 0.
+    # Credit each HIT2 to the GC who owned the seller AT the HIT2 conversion date (conv_friday) — the GC
+    # who actually delivered it — matching the Collated-sheet target GC namespace so target vs achieved align.
+    def _dtc(d):
+        try: return datetime.datetime.fromisoformat(str(d)[:19])
+        except (ValueError, TypeError): return None
+    hit2_chlog = {}
+    try:
+        for cr in req(f"{url}/api/card/10992/query/json", 'POST', {}, H):
+            if cr.get('assignee') == 'GC':
+                hit2_chlog.setdefault(str(cr.get('seller_id') or ''), []).append(cr)
+    except Exception as _e:
+        print('[tva] changelog card 10992 fetch failed:', _e)
+
+    def hit2_gc(sid):
+        fri = conv_friday.get(sid)
+        recs = hit2_chlog.get(sid, [])
+        if not fri or not recs:
+            return None
+        ts = _dtc(fri)
+        act = [x for x in recs if _dtc(x.get('start_date')) and _dtc(x['start_date']) <= ts
+               and (not x.get('end_date') or (_dtc(x['end_date']) and _dtc(x['end_date']) >= ts))]
+        if act:
+            return clean(act[-1].get('name'))
+        prev = sorted([x for x in recs if _dtc(x.get('end_date')) and _dtc(x['end_date']) <= ts],
+                      key=lambda x: _dtc(x['end_date']))
+        return clean(prev[-1].get('name')) if prev else None
+
     # ---- per-GL Google qualifiers (1k-5k accounts / live-google / google-spending), from scaling ----
     _ceil = lambda x: int(x) + (1 if x > int(x) else 0)
     gl_goog = {}
@@ -456,8 +485,36 @@ def main():
             'gSLDelta': max(0, _ceil(0.6 * glive) - gspend),
         }
 
+    # assigned 1k-5k sellers per GC (denominator for Meta Spend/Live)
+    assigned_by_gc = {}
+    for sid in sids:
+        g = smap.get(sid, {}).get('gc')
+        if g in gls:
+            assigned_by_gc[g] = assigned_by_gc.get(g, 0) + 1
+
+    # ---- day-wise spend/live per GC for a month (weighted avg = Σ spending-days ÷ Σ live-days) ----
+    # perf_by_date[d]['rows'] = [sid, arr_m, spend_m, arr_g, spend_g, arr_all, spend_all]. A seller
+    # counts as "spending" on a day if that day's spend > 0. Meta live-denom = assigned per GC;
+    # Google live-denom = google-live count per GC (gl_goog[gc]['glive']). Weighted over the month's
+    # settled days so a GC's rate reflects sustained spending, not a single snapshot.
+    def daywise_sl(ym):
+        pref = '%d-%02d' % (int(ym[:4]), int(ym[4:]))
+        mdays = [d for d in good_dates if d[:7] == pref]
+        m_sp, g_sp = {}, {}   # gc -> Σ over days of (# sellers spending that day)
+        for d in mdays:
+            for row in perf_by_date.get(d, {}).get('rows', []):
+                g = smap.get(row[0], {}).get('gc')
+                if g not in gls:
+                    continue
+                if row[2] > 0:
+                    m_sp[g] = m_sp.get(g, 0) + 1
+                if row[4] > 0:
+                    g_sp[g] = g_sp.get(g, 0) + 1
+        return {'nd': len(mdays), 'metaSpendDays': m_sp, 'googSpendDays': g_sp}
+
     def compute_tva(ym):
         ry, rm = int(ym[:4]), int(ym[4:])
+        dsl = daywise_sl(ym); nd = dsl['nd']
         arrT, arrA, det = {}, {}, {}
         for sid, cym in cohort_sellers.items():
             arr = frozen_arr.get(sid)   # HIT2 sellers: ARR frozen at their conversion Friday
@@ -485,8 +542,9 @@ def main():
             except (ValueError, TypeError):
                 continue
             sid_h = str(r.get('seller_id') or '').strip()
-            own = hit2_owner.get(sid_h)
-            gl = own['gl'] if own else 'Unassigned'   # HIT2 credited per the Handover sheet
+            # HIT2 delivered = hit2==1 count from card 10453, credited to the GC who owned the seller at
+            # the HIT2 conversion date (changelog card 10992). Falls back to current GC / Handover sheet.
+            gl = hit2_gc(sid_h) or smap.get(sid_h, {}).get('gc') or (hit2_owner.get(sid_h) or {}).get('gl') or 'Unassigned'
             if gl not in gls:
                 continue
             h2A[gl] = h2A.get(gl, 0) + 1
@@ -501,15 +559,23 @@ def main():
             return {'name': name, 'hit2T': h2t_v, 'hit2A': h2a_v, 'arrT': aT, 'arrA': aA,
                     'delta': max(0, round(0.85 * aT - aA)), 'n': nrec,
                     'hit2Ok': hit2_ok, 'arrOk': arr_ok, 'qualified': hit2_ok and arr_ok}
+        def daywise_fields(name, metaLive, googLive):
+            m = dsl['metaSpendDays'].get(name, 0); g = dsl['googSpendDays'].get(name, 0)
+            metaPct = round(m / (nd * metaLive) * 100, 1) if (nd and metaLive) else None
+            googPct = round(g / (nd * googLive) * 100, 1) if (nd and googLive) else None
+            return {'metaSLPct': metaPct, 'gSLPctDW': googPct, 'slDays': nd}
+
         gl_rows = [mkrow(g, arrT.get(g, 0), arrA.get(g, 0), h2t.get(g), h2A.get(g, 0), len(det.get(g, []))) for g in gls]
         for row in gl_rows:
             gg = gl_goog.get(row['name'], {'acc': 0, 'glive': 0, 'gspend': 0})
             row.update(goog_fields(gg['acc'], gg['glive'], gg['gspend']))
+            row.update(daywise_fields(row['name'], assigned_by_gc.get(row['name'], 0), gg['glive']))
         gl_detail = {g: sorted(det.get(g, []), key=lambda x: -x['arr']) for g in gls}
         gl_hit2 = {g: h2det.get(g, []) for g in gls}
         # GM rollup
         gT, gA, gh2T, gh2A, gdet, ghit2 = {}, {}, {}, {}, {}, {}
         gGoog = {}
+        gAssigned, gMetaSD, gGoogSD = {}, {}, {}
         for g in gls:
             gm = gc2gm_all.get(g) or 'Unassigned'
             if gm == 'Unassigned':
@@ -523,11 +589,18 @@ def main():
             gg = gl_goog.get(g, {'acc': 0, 'glive': 0, 'gspend': 0})
             acc = gGoog.setdefault(gm, {'acc': 0, 'glive': 0, 'gspend': 0})
             acc['acc'] += gg['acc']; acc['glive'] += gg['glive']; acc['gspend'] += gg['gspend']
+            gAssigned[gm] = gAssigned.get(gm, 0) + assigned_by_gc.get(g, 0)
+            gMetaSD[gm] = gMetaSD.get(gm, 0) + dsl['metaSpendDays'].get(g, 0)
+            gGoogSD[gm] = gGoogSD.get(gm, 0) + dsl['googSpendDays'].get(g, 0)
         gms = sorted(gT)
         gm_rows = [mkrow(gm, gT.get(gm, 0), gA.get(gm, 0), gh2T.get(gm) or None, gh2A.get(gm, 0), len(gdet.get(gm, []))) for gm in gms]
         for row in gm_rows:
             gg = gGoog.get(row['name'], {'acc': 0, 'glive': 0, 'gspend': 0})
             row.update(goog_fields(gg['acc'], gg['glive'], gg['gspend']))
+            nm = row['name']; mL = gAssigned.get(nm, 0); gL = gg['glive']
+            row['metaSLPct'] = round(gMetaSD.get(nm, 0) / (nd * mL) * 100, 1) if (nd and mL) else None
+            row['gSLPctDW'] = round(gGoogSD.get(nm, 0) / (nd * gL) * 100, 1) if (nd and gL) else None
+            row['slDays'] = nd
         gm_detail = {gm: sorted(gdet.get(gm, []), key=lambda x: -x['arr']) for gm in gms}
         gm_hit2 = {gm: ghit2.get(gm, []) for gm in gms}
         return {'byGL': {'rows': gl_rows, 'detail': gl_detail, 'hit2': gl_hit2},
@@ -610,12 +683,55 @@ def main():
     for c in churned_tva:
         gc = smap.get(c['s'], {}).get('gc', 'Unassigned')
         churned_tva_by_gl.setdefault(gc, []).append(c['s'])
+    # ---- Final incentive % (per the incentive-logic doc) ----------------------------------------
+    # Base pool from HITS achievement (hit2A/hit2T): >=100% ->25%, 50-99% ->15%, <50% ->0%.
+    # ARR qualifier: must be >=85% of target else 0; ARR multiplier: >=2x ->2x, >=1.5x ->1.25x, else 1x.
+    # Churn: 0 ->1x, 1 ->0.5x, >=2 ->0. Meta Spend/Live: <60% ->0, 60-80% ->1x, >80% ->1.25x.
+    # Google Spend/Live: <65% ->0, 65-75% ->1x, >75% ->1.2x. Google Golives: <50% ->0, 50-65% ->1x, >65% ->1.25x.
+    # (Meta qualifier "Task Compliance>90% AND TS=100%" and NPS are not available per-GM here, so they
+    #  are not gated in this figure; Spend/Live uses the day-wise weighted average.)
+    def incentive_pct(row):
+        h2t, h2a = row.get('hit2T'), row.get('hit2A') or 0
+        if not h2t:
+            return {'pct': 0, 'reason': 'no HIT2 target'}
+        r = h2a / h2t
+        base = 25 if r >= 1 else (15 if r >= 0.5 else 0)
+        if base == 0:
+            return {'pct': 0, 'reason': 'HITS < 50% of target'}
+        aT, aA = row.get('arrT') or 0, row.get('arrA') or 0
+        if not aT or aA < 0.85 * aT:
+            return {'pct': 0, 'reason': 'ARR < 85% of target'}
+        ar = aA / aT
+        arrMult = 2.0 if ar >= 2 else (1.25 if ar >= 1.5 else 1.0)
+        ch = row.get('churn') or 0
+        churnMult = 1.0 if ch == 0 else (0.5 if ch == 1 else 0.0)
+        if churnMult == 0:
+            return {'pct': 0, 'reason': '2+ churns'}
+        mSL = row.get('metaSLPct')
+        if mSL is None or mSL < 60:
+            return {'pct': 0, 'reason': 'Meta Spend/Live < 60%'}
+        metaMult = 1.25 if mSL > 80 else 1.0
+        gSL = row.get('gSLPctDW')
+        if gSL is None or gSL < 65:
+            return {'pct': 0, 'reason': 'Google Spend/Live < 65%'}
+        googMult = 1.2 if gSL > 75 else 1.0
+        gGo = row.get('gGolivePct')
+        if gGo is None or gGo < 50:
+            return {'pct': 0, 'reason': 'Google Golives < 50%'}
+        goliveMult = 1.25 if gGo > 65 else 1.0
+        pct = round(base * arrMult * churnMult * metaMult * googMult * goliveMult, 2)
+        return {'pct': pct, 'reason': 'base %d%% x ARR %.2fx x churn %.1fx x metaSL %.2fx x gSL %.1fx x golive %.2fx'
+                % (base, arrMult, churnMult, metaMult, googMult, goliveMult)}
+
     for ym, tva_data in by_month.items():
         for row in tva_data['byGL']['rows']:
             row['churn'] = len(churned_tva_by_gl.get(row['name'], []))
         for row in tva_data['byGM']['rows']:
             cnt = sum(len(churned_tva_by_gl.get(g, [])) for g in gls if gc2gm_all.get(g) == row['name'])
             row['churn'] = cnt
+        for row in tva_data['byGL']['rows'] + tva_data['byGM']['rows']:
+            inc = incentive_pct(row)
+            row['incentive'] = inc['pct']; row['incentiveReason'] = inc['reason']
 
     # Weekly 1k-5k metrics for the table under ARR Cohort (1k-5k): HIT1 / HIT2 / HIT1+HIT2 toggle.
     # HIT1 = card 11115, HIT2 = card 11727, HIT1+HIT2 = card 11740 (identical column schema).
