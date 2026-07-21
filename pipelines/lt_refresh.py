@@ -174,13 +174,25 @@ def main():
         print("[lt] card 2787 failed (%s); using cached gc_detail spend.life for %d sellers" % (str(_e)[:50], len(life_spend)))
 
     # ---- golive POC = GC assigned at a seller's golive date (assignment changelog, card 10992) ----
+    # api-key forces a fresh BQ run (quota-limited); on failure retry with a session token (cached result).
     _gc_ivals = defaultdict(list)  # sid -> [records]
-    try:
-        for cr in req(f"{url}/api/card/10992/query/json", "POST", {}, H):
-            if cr.get("assignee") == "GC":
-                _gc_ivals[str(cr.get("seller_id") or "")].append(cr)
-    except Exception as _e:
-        print("[lt] card 10992 changelog fetch failed (golive POC will show —):", str(_e)[:120])
+    def _fetch_10992():
+        try:
+            return req(f"{url}/api/card/10992/query/json", "POST", {}, H)
+        except Exception as _e1:
+            if email and pw:
+                try:
+                    _tok = req(url + "/api/session", "POST", {"username": email, "password": pw}, {"Content-Type": "application/json"})["id"]
+                    r = req(f"{url}/api/card/10992/query/json", "POST", {}, {"X-Metabase-Session": _tok, "Content-Type": "application/json"})
+                    print("[lt] card 10992 api-key failed; used session (cached) result")
+                    return r
+                except Exception as _e2:
+                    print("[lt] card 10992 session fetch also failed:", str(_e2)[:80])
+            print("[lt] card 10992 changelog unavailable (golive POC will show —):", str(_e1)[:80])
+            return []
+    for cr in _fetch_10992():
+        if cr.get("assignee") == "GC":
+            _gc_ivals[str(cr.get("seller_id") or "")].append(cr)
 
     def _cdt(d):
         try:
