@@ -414,7 +414,9 @@ def main():
             continue
         try:
             fri = datetime.date.fromisocalendar(int(yw[:4]), int(yw[4:6]), 5)  # Friday of that ISO week
-            conv_friday[sid] = fri.isoformat()
+            # keep the EARLIEST HIT2 conversion (a seller graduates once)
+            if sid not in conv_friday or fri.isoformat() < conv_friday[sid]:
+                conv_friday[sid] = fri.isoformat()
         except (ValueError, TypeError):
             continue
     # frozen ARR = latest daily ARR_All (card 10469) on/before that seller's conversion Friday
@@ -431,7 +433,11 @@ def main():
         if ds and ds <= fri and (sid not in frozen_arr or ds > frozen_arr[sid][0]):
             frozen_arr[sid] = (ds, fnum(at))
     frozen_arr = {sid: round(v[1]) for sid, v in frozen_arr.items()}
-    print(f"[tva] frozen ARR at conversion Friday for {len(frozen_arr)} HIT2 sellers")
+    # HIT2 conversion MONTH per seller (month of the conversion Friday) — the point the seller
+    # graduates out of the 1k-5k bucket. From this month on, that seller's ARR *and* their target
+    # age freeze at the conversion-Friday value (they stop accruing target as they're no longer running).
+    hit2_freeze_ym = {sid: '%d%02d' % (int(fri[:4]), int(fri[5:7])) for sid, fri in conv_friday.items()}
+    print(f"[tva] frozen ARR at conversion Friday for {len(frozen_arr)} HIT2 sellers · {len(hit2_freeze_ym)} freeze-months")
 
     # ---- HIT2 attribution via the assignment changelog (card 10992) ----
     # Current mapping (card 7753) is blank/stale for HIT2 sellers post-move, so HIT2 Achieved showed 0.
@@ -524,21 +530,35 @@ def main():
         dsl = daywise_sl(ym); nd = dsl['nd']
         arrT, arrA, det = {}, {}, {}
         for sid, cym in cohort_sellers.items():
-            arr = frozen_arr.get(sid)   # HIT2 sellers: ARR frozen at their conversion Friday
-            if arr is None:
+            fz_ym = hit2_freeze_ym.get(sid)                 # HIT2 conversion month, or None
+            # freeze only when the conversion month is sane: on/after the cohort HIT1 month AND
+            # on/before this report month. A HIT2 week before the HIT1 month = bad data -> stay active.
+            frozen = (fz_ym is not None) and (cym <= fz_ym <= ym)
+            if frozen:
+                # FREEZE: ARR, target-age and GC all held at the HIT2-conversion Friday.
+                arr = frozen_arr.get(sid)
+                if arr is None:                              # 10469 had no row on/before Friday -> best effort
+                    arr = arr_by_sm.get((sid, fz_ym)) or arr_by_sm.get((sid, ym))
+                eff_ym = fz_ym
+                gc = hit2_gc(sid) or smap.get(sid, {}).get('gc', 'Unassigned')
+            else:
+                # ACTIVE (still HIT1 in this month, or never HIT2): live ARR, live age, current GC.
                 arr = arr_by_sm.get((sid, ym))
+                eff_ym = ym
+                gc = smap.get(sid, {}).get('gc', 'Unassigned')
             if arr is None:
                 continue
-            age = (ry - int(cym[:4])) * 12 + (rm - int(cym[4:]))
-            if age < 0:
-                continue
-            gc = smap.get(sid, {}).get('gc', 'Unassigned')
             if gc not in gls:
                 continue  # only canonical 1k-5k GLs
+            age = (int(eff_ym[:4]) - int(cym[:4])) * 12 + (int(eff_ym[4:]) - int(cym[4:]))
+            if age < 0:
+                continue
             t = target_for(age)
             arrT[gc] = arrT.get(gc, 0) + t
             arrA[gc] = arrA.get(gc, 0) + arr
-            det.setdefault(gc, []).append({'s': sid, 'n': name_by_s.get(sid, ''), 'age': 'M%d' % age, 'tgt': t, 'arr': arr})
+            det.setdefault(gc, []).append({'s': sid, 'n': name_by_s.get(sid, ''), 'age': 'M%d' % age,
+                                           'tgt': t, 'arr': arr, 'frozen': frozen,
+                                           'freezeMonth': (fz_ym if frozen else None)})
         h2A, h2det = {}, {}
         for r in hitrows:
             if str(r.get('hit2')).strip() not in ('1', '1.0', 'True', 'true'):
