@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: refresh-data
+  group: data-write
   cancel-in-progress: false
 
 jobs:

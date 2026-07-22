@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: gc-light-refresh
+  group: data-write
   cancel-in-progress: false
 
 jobs:

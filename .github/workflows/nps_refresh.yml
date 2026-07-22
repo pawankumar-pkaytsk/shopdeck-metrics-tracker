@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: nps-refresh
+  group: data-write
   cancel-in-progress: false
 
 jobs:

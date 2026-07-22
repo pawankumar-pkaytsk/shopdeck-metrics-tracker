@@ -13,7 +13,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: gm-daily
+  group: data-write
   cancel-in-progress: false
 
 jobs:

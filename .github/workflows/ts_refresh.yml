@@ -13,7 +13,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: ts-refresh
+  group: data-write
   cancel-in-progress: false
 
 jobs:
