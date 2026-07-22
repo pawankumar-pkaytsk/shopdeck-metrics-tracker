@@ -38,6 +38,7 @@ def read_sheet_sa(sid, rng):
 ARR_CARD = 10469  # day-wise seller-wise spend + ARR (Meta/Google/overall), last 6 months, all sellers
 HIT_CARD = 10453
 COHORT_CARD = 11020  # hit1 seller-monthwise ARR cohort (hit_year_month x M0..M6, incl TARGET row)
+REVENUE_COHORT_CARD = 12072  # revenue-seller monthwise ARR cohort (same shape/target, since Feb-26)
 COHORT_ARR_CARD = 7336  # sellerwise-monthwise ARR — seller-level, for per-cell drilldown + GM/GL split
 COHORT_MAP_CARD = 7753  # seller -> GC (growth_consultant_name) / GM (growth_manager_name)
 # sellers excluded from the cohort (mirrors card 10881 SQL)
@@ -311,6 +312,21 @@ def main():
         else:
             cohort_rows.append({'ym': ym, 'n': r.get('seller_count'), 'v': vals})
     cohort_rows.sort(key=lambda x: x['ym'])
+
+    # ---- Revenue-seller ARR cohort (card 12072): same M0..M6 x TARGET shape, since Feb-26 ----
+    revenue_cohort = {'mcols': mcols, 'target': {}, 'rows': []}
+    try:
+        for r in req(f"{url}/api/card/{REVENUE_COHORT_CARD}/query/json", 'POST', {}, H):
+            ym = str(r.get('hit_year_month') or '')
+            vals = {c: (round(fnum(r.get(c.lower()))) if r.get(c.lower()) is not None else None) for c in mcols}
+            if ym.upper() == 'TARGET':
+                revenue_cohort['target'] = vals
+            else:
+                revenue_cohort['rows'].append({'ym': ym, 'n': r.get('seller_count'), 'v': vals})
+        revenue_cohort['rows'].sort(key=lambda x: x['ym'])
+        print(f"[cohort] revenue ARR cohort (card {REVENUE_COHORT_CARD}): {len(revenue_cohort['rows'])} cohort months")
+    except Exception as _e:
+        print(f"[cohort] revenue ARR cohort (card {REVENUE_COHORT_CARD}) failed: {_e}")
 
     # cohort membership (seller -> earliest hit_year_month, matching 11020's MIN) from hit_master_data
     cohort_sellers = {}
@@ -1772,6 +1788,7 @@ def main():
             'accounts':    {'value': len(sids), 'detail': accounts_detail},
             'hit2':        {'value': len(hit2_detail), 'detail': hit2_detail},
             'cohort':      cohort,
+            'revenueCohort': revenue_cohort,
             'weekly1k5k':  weekly_1k5k,
             'weeklyByHit': weekly_by_hit,
             'googleWk':    google_wk,
