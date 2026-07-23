@@ -66,7 +66,8 @@ def main():
 
     tasks = req(f"{url}/api/card/{TASK_CARD}/query/json", "POST", {}, H)
     _done = ("completed", "closed")
-    rows = []
+    today = datetime.date.today()
+    rows, pending = [], []
     for t in tasks:
         if str(t.get("assignee_bucket") or "").strip().upper() != "KAE":
             continue
@@ -80,7 +81,26 @@ def main():
         tat, sla = _num(t.get("tat")), _num(t.get("sla_in_min"))
         within = 1 if (done and tat is not None and sla is not None and tat <= sla) else 0
         rows.append({"k": kae, "cr": cr, "cp": cp if done else "",
-                     "d": 1 if done else 0, "w": within, "p": 1 if st == "pending" else 0})
+                     "d": 1 if done else 0, "w": within, "p": 1 if st == "pending" else 0,
+                     "sid": str(t.get("seller_id") or ""), "ty": str(t.get("sub_type") or t.get("type") or "").strip(),
+                     "sla": (int(sla) if sla is not None else None), "tat": (int(tat) if tat is not None else None)})
+        if st == "pending":
+            due = str(t.get("task_due_date") or "")[:10]
+            try:
+                days_open = (today - datetime.date.fromisoformat(cr)).days if cr else None
+            except ValueError:
+                days_open = None
+            overdue = None
+            if due:
+                try: overdue = (today - datetime.date.fromisoformat(due)).days
+                except ValueError: overdue = None
+            pending.append({
+                "kae": kae, "sid": str(t.get("seller_id") or ""),
+                "ty": str(t.get("sub_type") or t.get("type") or "").strip(),
+                "cr": cr, "due": due, "slaMin": (int(sla) if sla is not None else None),
+                "daysOpen": days_open, "overdueDays": overdue,
+            })
+    pending.sort(key=lambda x: (-(x["overdueDays"] if x["overdueDays"] is not None else -9999), x["kae"]))
 
     crs = [r["cr"] for r in rows if r["cr"]]
     out = {
@@ -89,10 +109,11 @@ def main():
         "kaes": sorted({r["k"] for r in rows}),
         "dateRange": {"min": min(crs) if crs else None, "max": max(crs) if crs else None},
         "rows": rows,
+        "pending": pending,
     }
     json.dump(out, open(OUT, "w"), separators=(",", ":"))
     print(f"[kae] HITS: {len(rows)} KAE tasks · {len(out['kaes'])} KAEs · "
-          f"{sum(r['d'] for r in rows)} done, {sum(r['p'] for r in rows)} pending "
+          f"{sum(r['d'] for r in rows)} done, {len(pending)} pending "
           f"({out['dateRange']['min']}..{out['dateRange']['max']}) -> {OUT}")
 
 
