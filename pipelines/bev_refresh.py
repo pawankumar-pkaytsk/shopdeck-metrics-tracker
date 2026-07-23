@@ -1443,7 +1443,7 @@ def main():
         _wk = defaultdict(lambda: defaultdict(lambda: [0.0, 0]))  # sid -> yw -> [sumARR, days]
         for r in rows10469:
             sid = str(r.get('seller_id') or '').strip()
-            if sid not in hit1_of:
+            if sid not in hit1_of and sid not in _rev_sids:
                 continue
             at = r.get('arr_overall')
             if at is None:
@@ -1484,7 +1484,10 @@ def main():
                     sp.append((sid, name_of.get(sid, ''), sum(v) / len(v)))
             return {'byWeek': byw, 'since': _bkt(sp)}
         arr_buckets = {'weeks': bweeks, 'variants': {
-            'hit1': _bv(lambda s: not is_hit2_of.get(s)), 'hit2': _bv(lambda s: is_hit2_of.get(s)), 'hit12': _bv(lambda s: True)}}
+            'hit1': _bv(lambda s: s in hit1_of and not is_hit2_of.get(s)),
+            'hit2': _bv(lambda s: is_hit2_of.get(s)),
+            'hit12': _bv(lambda s: s in hit1_of),
+            'revenue': _bv(lambda s: (s in _rev_sids) and (s not in hit1_of))}}
         print(f"[bev2] ARR buckets: {len(bweeks)} weeks")
     except Exception as _e:
         print(f"[bev2] ARR buckets failed: {_e}")
