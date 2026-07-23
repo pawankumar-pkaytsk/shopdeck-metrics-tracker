@@ -95,6 +95,7 @@ def main():
                 try: overdue = (today - datetime.date.fromisoformat(due)).days
                 except ValueError: overdue = None
             pending.append({
+                "id": str(t.get("id") or ""),
                 "kae": kae, "sid": str(t.get("seller_id") or ""),
                 "ty": str(t.get("sub_type") or t.get("type") or "").strip(),
                 "cr": cr, "due": due, "slaMin": (int(sla) if sla is not None else None),
