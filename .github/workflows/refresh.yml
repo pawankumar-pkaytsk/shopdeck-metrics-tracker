@@ -101,6 +101,9 @@ jobs:
       - name: Revival Log (card 11911)
         continue-on-error: true
         run: python pipelines/revival_refresh.py
+      - name: KAE compliance (cards 11244 + 10959)
+        continue-on-error: true
+        run: python pipelines/kae_refresh.py
 
       - name: Snapshot (dated, compressed archive for time-travel)
         continue-on-error: true
