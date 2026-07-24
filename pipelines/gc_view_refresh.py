@@ -139,6 +139,34 @@ def main():
             gc_of[sid] = gc
     print(f"[gc] 7753: {len(gc_of)} sellers under a GC")
 
+    # ---- 10992: assignment changelog -> per-seller PAST people history (role, name, dates, #days) ----
+    _tday = datetime.date.today()
+    def _d10(d):
+        try: return datetime.date.fromisoformat(str(d)[:10])
+        except (ValueError, TypeError): return None
+    people_hist = {}
+    try:
+        _clog = req(f"{url}/api/card/10992/query/json", "POST", {}, H)
+    except Exception as _e1:
+        _clog = []
+        try:  # api-key forces a fresh BQ scan (quota); session returns the cached result
+            _tok = req(url + "/api/session", "POST", {"username": email, "password": pw}, {'Content-Type': 'application/json'})['id']
+            _clog = req(f"{url}/api/card/10992/query/json", "POST", {}, {'X-Metabase-Session': _tok, 'Content-Type': 'application/json'})
+        except Exception as _e2:
+            print("[gc] card 10992 changelog unavailable:", str(_e2)[:80])
+    for cr in _clog:
+        sid = str(cr.get("seller_id") or "").strip()
+        if not sid:
+            continue
+        s, e = _d10(cr.get("start_date")), _d10(cr.get("end_date"))
+        people_hist.setdefault(sid, []).append({
+            "role": _norm(cr.get("assignee")), "name": _norm(cr.get("name")),
+            "start": s.isoformat() if s else "", "end": e.isoformat() if e else "",
+            "days": (((e or _tday) - s).days if s else None), "current": e is None})
+    for sid in people_hist:
+        people_hist[sid].sort(key=lambda x: (x["role"], x["start"]))
+    print(f"[gc] 10992 people history: {len(people_hist)} sellers")
+
     # ---- Daily Plan assigned count per GC (for the 'on leave' flag only) ----
     dp_set = defaultdict(set)
     for r in _sheet(DP_SHEET, DP_RANGE):
@@ -388,6 +416,7 @@ def main():
                 "pnl": (pnl11011.get(sid) or {}).get("w") or [{"pnl": None, "spend": None}, {"pnl": None, "spend": None}, {"pnl": None, "spend": None}], "pnlSource": (pnl11011.get(sid) or {}).get("src", ""), "totalTS": (t.get("t") if t.get("t") is not None else 0),
                 "icp": icp, "icpFlag": icp_flag, "pqLifetime": (pq_of.get(sid) or {}).get("life"), "pq15": (pq_of.get(sid) or {}).get("d15"),
                 "people": {k: v for k, v in (people_per(sid, gc, roles_of)).items() if v and v != "-"},
+                "peopleHistory": people_hist.get(sid, []),
                 "lastTsDate": d, "lastTsActions": _norm(t.get("a")),
                 "totalCalls": calls_total.get(sid, 0), "callsAfterPaused": calls_after.get(sid, 0),
                 "tasksPending": t_pending.get(sid, []), "tasksDone": t_done.get(sid, []),
