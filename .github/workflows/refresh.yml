@@ -92,6 +92,9 @@ jobs:
       - name: Troubleshoot SOP Compliance (card 10181)
         continue-on-error: true
         run: python pipelines/ts_sop_refresh.py
+      - name: Creative Generation Cost (card 12131)
+        continue-on-error: true
+        run: python pipelines/creative_cost_refresh.py
       - name: Seller call records (card 9688, sharded)
         continue-on-error: true
         run: python pipelines/calls_refresh.py
