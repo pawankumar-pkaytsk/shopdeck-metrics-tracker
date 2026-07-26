@@ -1679,56 +1679,45 @@ def main():
         sl_history.append({'d': today.isoformat(), 'meta': sl_meta_pct, 'google': sl_google_pct, 'blended': sl_blended_pct})
     print(f"[bev2] spend/live history: {len(sl_history)} points ({sl_history[0]['d'] if sl_history else '-'}..{sl_history[-1]['d'] if sl_history else '-'})")
 
-    # ---- (17) Churn comparison HIT1 / HIT2 / Revenue (card 12142): MoM churn month x age M0..M12 ----
+    # ---- (17) Churn cohort HIT1 / HIT2 / Revenue (card 12142): HIT-month cohort x churn age M0..M12 ----
     # Card 12142 = cohort churn matrix. Columns: seller_id, hit_team (HIT1/HIT2/Revenue),
-    # handover_date, handover_week, churn_week (= last spend week), churn_cohort (M0..M12, M12+),
-    # churn_flag (1 churned / 0 active). Base = all rows of a team; churned = churn_flag == 1.
-    # churn month = calendar month of (churn_week + 21 days); age (M-bucket) comes from churn_cohort.
-    # Only the last 6 calendar months of churn are kept.
-    churn_cmp = {'months': [], 'maxAge': 12,
+    # handover_date (Friday of hit week), churn_cohort (M0..M12, M12+), churn_flag (1 churned / 0 active).
+    # Rows = HIT (handover) month; cohortSize = all eligible sellers handed over that month (both flags);
+    # then M0..M12/12+ = how many of that cohort churned at each age. % view divides by that month's cohort.
+    churn_cmp = {'maxAge': 12,
                  'rows': {'HIT1': [], 'HIT2': [], 'REVENUE': []},
+                 'cohortSize': {'HIT1': {}, 'HIT2': {}, 'REVENUE': {}},
                  'totals': {'HIT1': 0, 'HIT2': 0, 'REVENUE': 0}}
     try:
-        def _yw_mon(yw):
-            s = str(yw); return datetime.date.fromisocalendar(int(s[:4]), int(s[4:6]), 1)
-        _cy, _cmm = today.year, today.month - 5   # 6-month window incl. current month
-        while _cmm <= 0:
-            _cmm += 12; _cy -= 1
-        _churn_cutoff = '%04d-%02d' % (_cy, _cmm)
         _seg_map = {'HIT1': 'HIT1', 'HIT2': 'HIT2', 'REVENUE': 'REVENUE', 'Revenue': 'REVENUE'}
         _crows = req(f"{url}/api/card/12142/query/json", 'POST', {}, H)
-        _cmonths = set()
         for _r in _crows:
             seg = _seg_map.get(str(_r.get('hit_team') or '').strip())
             if not seg:
                 continue
-            # per-team base (denominator for the % view) = all sellers of that team, both flags
+            hm = str(_r.get('handover_date') or '')[:7]   # HIT (handover) month YYYY-MM
+            if not hm:
+                continue
+            # cohort base (denominator for the % view) = all eligible sellers of that HIT month
+            churn_cmp['cohortSize'][seg][hm] = churn_cmp['cohortSize'][seg].get(hm, 0) + 1
             churn_cmp['totals'][seg] += 1
             if _r.get('churn_flag') != 1:
                 continue
-            cw, cohort = _r.get('churn_week'), str(_r.get('churn_cohort') or '')
-            if not cw or not cohort:
+            cohort = str(_r.get('churn_cohort') or '')
+            if not cohort:
                 continue
             try:
                 age = 13 if cohort.endswith('+') else int(cohort[1:])   # M12+ -> 13 (renders as 12+)
             except ValueError:
                 continue
-            try:
-                l = _yw_mon(cw)                                          # last-spend week
-                cm = (l + datetime.timedelta(days=21)).strftime('%Y-%m')  # churn month = +3 weeks
-            except (ValueError, TypeError):
-                continue
-            if cm < _churn_cutoff:   # only the last 6 months of churn
-                continue
             sid = str(_r.get('seller_id') or '')
-            churn_cmp['rows'][seg].append([sid, None, cm, age, name_by_s.get(sid, '')])
-            _cmonths.add(cm)
-        churn_cmp['months'] = sorted(_cmonths)
-        print(f"[bev2] churn cmp (card 12142, last 6mo >= {_churn_cutoff}): "
-              f"HIT1={len(churn_cmp['rows']['HIT1'])} HIT2={len(churn_cmp['rows']['HIT2'])} "
-              f"REVENUE={len(churn_cmp['rows']['REVENUE'])} · {len(_cmonths)} churn months")
+            churn_cmp['rows'][seg].append([sid, None, hm, age, name_by_s.get(sid, '')])
+        print(f"[bev2] churn cohort (card 12142): "
+              f"HIT1={len(churn_cmp['rows']['HIT1'])}/{churn_cmp['totals']['HIT1']} "
+              f"HIT2={len(churn_cmp['rows']['HIT2'])}/{churn_cmp['totals']['HIT2']} "
+              f"REVENUE={len(churn_cmp['rows']['REVENUE'])}/{churn_cmp['totals']['REVENUE']} churned/base")
     except Exception as _e:
-        print(f"[bev2] card 12142 churn cmp failed: {_e}")
+        print(f"[bev2] card 12142 churn cohort failed: {_e}")
 
     # ---- (18) Platform-level 1k-5k weekly metrics (card 11746): RTO / GMV / cancel / COGS / AOV ... ----
     platform_wk = []
