@@ -1679,10 +1679,10 @@ def main():
         sl_history.append({'d': today.isoformat(), 'meta': sl_meta_pct, 'google': sl_google_pct, 'blended': sl_blended_pct})
     print(f"[bev2] spend/live history: {len(sl_history)} points ({sl_history[0]['d'] if sl_history else '-'}..{sl_history[-1]['d'] if sl_history else '-'})")
 
-    # ---- (17) Churn cohort HIT1 / HIT2 / Revenue (card 12142): HIT-month cohort x churn age M0..M12 ----
-    # Card 12142 = cohort churn matrix. Columns: seller_id, hit_team (HIT1/HIT2/Revenue),
-    # handover_date (first of HIT month), churn_cohort (M0..M12, M12+), churn_flag (1 churned / 0 active).
-    # HIT1 cohort matches section 1 (all HIT1'd, incl HIT2 grads, by hit_month); HIT2/Revenue Feb-26+.
+    # ---- (17) Churn cohort HIT1 / HIT2 / Revenue (card 12159): HIT-week-month cohort x churn age ----
+    # Card 12159 = cohort churn v2. Columns: seller_id, hit_team (HIT1/HIT2/Revenue),
+    # handover_date (first of hit-WEEK month), churn_cohort (M0..M12, M12+ via ROUND(weekgap/4.5)),
+    # churn_flag (1 churned / 0 active). Cohorts Feb-26+; age = round((churn_wk - hit_wk)/4.5).
     # Rows = HIT month; cohortSize = all sellers handed over that month (both flags);
     # then M0..M12/12+ = how many of that cohort churned at each age. % view divides by that month's cohort.
     churn_cmp = {'maxAge': 12,
@@ -1691,7 +1691,7 @@ def main():
                  'totals': {'HIT1': 0, 'HIT2': 0, 'REVENUE': 0}}
     try:
         _seg_map = {'HIT1': 'HIT1', 'HIT2': 'HIT2', 'REVENUE': 'REVENUE', 'Revenue': 'REVENUE'}
-        _crows = req(f"{url}/api/card/12142/query/json", 'POST', {}, H)
+        _crows = req(f"{url}/api/card/12159/query/json", 'POST', {}, H)
         for _r in _crows:
             seg = _seg_map.get(str(_r.get('hit_team') or '').strip())
             if not seg:
@@ -1734,7 +1734,7 @@ def main():
               f"HIT2={len(churn_cmp['rows']['HIT2'])}/{churn_cmp['totals']['HIT2']} "
               f"REVENUE={len(churn_cmp['rows']['REVENUE'])}/{churn_cmp['totals']['REVENUE']} churned/base")
     except Exception as _e:
-        print(f"[bev2] card 12142 churn cohort failed: {_e}")
+        print(f"[bev2] card 12159 churn cohort failed: {_e}")
 
     # ---- (18) Platform-level 1k-5k weekly metrics (card 11746): RTO / GMV / cancel / COGS / AOV ... ----
     platform_wk = []
