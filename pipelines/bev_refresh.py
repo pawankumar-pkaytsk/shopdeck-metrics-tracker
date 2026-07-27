@@ -1712,6 +1712,16 @@ def main():
                 continue
             sid = str(_r.get('seller_id') or '')
             churn_cmp['rows'][seg].append([sid, None, hm, age, name_by_s.get(sid, '')])
+        # max observed age per segment = age of the OLDEST cohort (don't draw the line past this)
+        _now_idx = today.year * 12 + today.month
+        churn_cmp['maxObs'] = {}
+        for _seg in ('HIT1', 'HIT2', 'REVENUE'):
+            _hms = list(churn_cmp['cohortSize'][_seg].keys())
+            if _hms:
+                _oldest = min(int(h[:4]) * 12 + int(h[5:7]) for h in _hms)
+                churn_cmp['maxObs'][_seg] = min(_now_idx - _oldest, churn_cmp['maxAge'] + 1)
+            else:
+                churn_cmp['maxObs'][_seg] = 0
         print(f"[bev2] churn cohort (card 12142): "
               f"HIT1={len(churn_cmp['rows']['HIT1'])}/{churn_cmp['totals']['HIT1']} "
               f"HIT2={len(churn_cmp['rows']['HIT2'])}/{churn_cmp['totals']['HIT2']} "
