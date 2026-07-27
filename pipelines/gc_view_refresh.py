@@ -450,6 +450,67 @@ def main():
             "strikes": eg,
         }
 
+    # ---- GC-less but MANAGED sellers (revenue / unassigned with a GM/GL/KAM/KAE): detail-only
+    # entries so "Show any seller details" can look them up by ID. Not added to any GC book. ----
+    _extra = [sid for sid in roles_of if sid not in detail
+              and any(roles_of[sid].get(k) for k in ("GM", "GL", "KAM", "KAE"))]
+    for sid in _extra:
+        gv = golive.get(sid) or {}
+        a2h, gol = gv.get("a") or "", gv.get("g") or ""
+        is_live = bool(gol); nl = bool(a2h and not gol)
+        sc = scaling.get(sid) or {}
+        is_spending = num(sc.get("my")) > 1 or num(sc.get("gy")) > 10
+        t = ts_sellers.get(sid) or {}
+        d = t.get("d") or ""
+        ds = None
+        if d:
+            try: ds = (today - datetime.date.fromisoformat(d[:10])).days
+            except ValueError: ds = None
+        elig = num(t.get("s7")) > SPEND3K and (ds is None or ds > 7)
+        ls = last_spend.get(sid, "")
+        paused = bool(ls and ls < yday_iso)
+        is_exp = sid in experimental
+        icp = icp_of.get(sid)
+        icp_flag = "no_icp" if icp is None else ("low_icp" if icp < 7 else "high_icp")
+        blocked = sid in ad_blocked
+        tkt = ab_ticket.get(sid)
+        nfo = info.get(sid, {})
+        cases = []
+        if nl: cases.append("Golive pending")
+        if blocked: cases.append("Ad account blocked")
+        if sid in funds_low: cases.append("Funds addition (low balance)")
+        if elig: cases.append("Troubleshoot due")
+        if paused: cases.append("Account paused")
+        ab = None
+        if blocked:
+            resolved = bool(tkt and tkt.get("resolved"))
+            bd = ab_date.get(sid, "")
+            pend_days = None
+            if not resolved and bd:
+                try: pend_days = (today - datetime.date.fromisoformat(bd)).days
+                except ValueError: pend_days = None
+            ab = {"reason": ab_reason.get(sid, ""), "blockDate": bd, "ticketRaised": bool(tkt),
+                  "resolved": resolved, "resolutionDate": (tkt or {}).get("resolutionDate", ""), "pendingDays": pend_days}
+        detail[sid] = {
+            "name": nfo.get("name") or _norm(t.get("n")),
+            "spend": {"today": round(spend_of.get(sid, {}).get("today", 0)), "yest": round(spend_of.get(sid, {}).get("yest", 0)), "life": round(spend_of.get(sid, {}).get("life", 0))},
+            "firstSpendDate": first_spend.get(sid, ""), "lastSpendDate": ls, "pauseDate": ls,
+            "adAccountType": acct_type.get(sid, ""), "remainingFunds": round(remaining.get(sid, 0)),
+            "pnl": (pnl11011.get(sid) or {}).get("w") or [{"pnl": None, "spend": None}, {"pnl": None, "spend": None}, {"pnl": None, "spend": None}], "pnlSource": (pnl11011.get(sid) or {}).get("src", ""), "totalTS": (t.get("t") if t.get("t") is not None else 0),
+            "icp": icp, "icpFlag": icp_flag, "pqLifetime": (pq_of.get(sid) or {}).get("life"), "pq15": (pq_of.get(sid) or {}).get("d15"),
+            "people": {k: v for k, v in (people_per(sid, "", roles_of)).items() if v and v != "-"},
+            "peopleHistory": people_hist.get(sid, []),
+            "lastTsDate": d, "lastTsActions": _norm(t.get("a")),
+            "totalCalls": calls_total.get(sid, 0), "callsAfterPaused": calls_after.get(sid, 0),
+            "tasksPending": t_pending.get(sid, []), "tasksDone": t_done.get(sid, []),
+            "callsPending": c_pending.get(sid, []), "callsDone": c_done.get(sid, []),
+            "adBlocked": blocked, "adBlock": ab, "fundsLow": sid in funds_low,
+            "live": is_live, "notLiveYet": nl, "spending": is_spending,
+            "paused": paused, "experimental": is_exp, "hypercare": False, "cases": cases,
+            "noGC": True,
+        }
+    print(f"[gc] +{len(_extra)} GC-less managed sellers added to detail (lookup-only)")
+
     ts_gen = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     json.dump({"generatedAt": ts_gen, "asOfMonth": today.strftime("%Y-%m"), "gcs": gcs, "byGC": by_gc}, open(OUT, "w"), separators=(",", ":"))
     json.dump({"generatedAt": ts_gen, "detail": detail}, open(DETAIL_OUT, "w"), separators=(",", ":"))
