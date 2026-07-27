@@ -1681,8 +1681,9 @@ def main():
 
     # ---- (17) Churn cohort HIT1 / HIT2 / Revenue (card 12142): HIT-month cohort x churn age M0..M12 ----
     # Card 12142 = cohort churn matrix. Columns: seller_id, hit_team (HIT1/HIT2/Revenue),
-    # handover_date (Friday of hit week), churn_cohort (M0..M12, M12+), churn_flag (1 churned / 0 active).
-    # Rows = HIT (handover) month; cohortSize = all eligible sellers handed over that month (both flags);
+    # handover_date (first of HIT month), churn_cohort (M0..M12, M12+), churn_flag (1 churned / 0 active).
+    # HIT1 cohort matches section 1 (all HIT1'd, incl HIT2 grads, by hit_month); HIT2/Revenue Feb-26+.
+    # Rows = HIT month; cohortSize = all sellers handed over that month (both flags);
     # then M0..M12/12+ = how many of that cohort churned at each age. % view divides by that month's cohort.
     churn_cmp = {'maxAge': 12,
                  'rows': {'HIT1': [], 'HIT2': [], 'REVENUE': []},
