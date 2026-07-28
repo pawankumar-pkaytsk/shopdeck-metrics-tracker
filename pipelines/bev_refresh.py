@@ -39,6 +39,7 @@ ARR_CARD = 10469  # day-wise seller-wise spend + ARR (Meta/Google/overall), last
 HIT_CARD = 10453
 COHORT_CARD = 11020  # hit1 seller-monthwise ARR cohort (hit_year_month x M0..M6, incl TARGET row)
 REVENUE_COHORT_CARD = 12072  # revenue-seller monthwise ARR cohort (same shape/target, since Feb-26)
+REVENUE_COHORT_DETAIL_CARD = 12186  # seller-level rows behind card 12072 (drilldown per ym x M)
 COHORT_ARR_CARD = 7336  # sellerwise-monthwise ARR — seller-level, for per-cell drilldown + GM/GL split
 COHORT_MAP_CARD = 7753  # seller -> GC (growth_consultant_name) / GM (growth_manager_name)
 # sellers excluded from the cohort (mirrors card 10881 SQL)
@@ -327,6 +328,26 @@ def main():
         print(f"[cohort] revenue ARR cohort (card {REVENUE_COHORT_CARD}): {len(revenue_cohort['rows'])} cohort months")
     except Exception as _e:
         print(f"[cohort] revenue ARR cohort (card {REVENUE_COHORT_CARD}) failed: {_e}")
+
+    # revenue cohort per-(ym, M) seller lists (drilldown) from card 12186
+    revenue_cohort['detail'] = {}
+    try:
+        for r in req(f"{url}/api/card/{REVENUE_COHORT_DETAIL_CARD}/query/json", 'POST', {}, H):
+            ym = str(r.get('hit_year_month') or '')
+            num = r.get('cohort_month_num')
+            if not ym or num is None:
+                continue
+            num = int(num)
+            if num < 0 or num > 6:
+                continue
+            revenue_cohort['detail'].setdefault(ym, {}).setdefault('M%d' % num, []).append(
+                {'s': str(r.get('seller_id') or ''), 'n': str(r.get('company_name') or ''), 'arr': round(fnum(r.get('arr')))})
+        for k in revenue_cohort['detail']:
+            for mk in revenue_cohort['detail'][k]:
+                revenue_cohort['detail'][k][mk].sort(key=lambda x: -x['arr'])
+        print(f"[cohort] revenue cohort detail (card {REVENUE_COHORT_DETAIL_CARD}): {sum(len(v) for v in revenue_cohort['detail'].values())} ym cells")
+    except Exception as _e:
+        print(f"[cohort] revenue cohort detail (card {REVENUE_COHORT_DETAIL_CARD}) failed: {_e}")
 
     # cohort membership (seller -> earliest hit_year_month, matching 11020's MIN) from hit_master_data
     cohort_sellers = {}

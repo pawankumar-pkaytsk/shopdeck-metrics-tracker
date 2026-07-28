@@ -453,7 +453,7 @@ def main():
     # ---- GC-less but MANAGED sellers (revenue / unassigned with a GM/GL/KAM/KAE): detail-only
     # entries so "Show any seller details" can look them up by ID. Not added to any GC book. ----
     _extra = [sid for sid in roles_of if sid not in detail
-              and any(roles_of[sid].get(k) for k in ("GM", "GL", "KAM", "KAE"))]
+              and any(roles_of[sid].get(k) for k in ("KAM", "KAE"))]   # revenue account-managed book only
     for sid in _extra:
         gv = golive.get(sid) or {}
         a2h, gol = gv.get("a") or "", gv.get("g") or ""
