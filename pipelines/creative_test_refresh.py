@@ -4,11 +4,17 @@
 Source: card 12207 (Clothing A2H cohort — Meta campaign/adset/ad performance day-on-day
 post go-live). Grain: one row per level x entity x seller x day.
 
-IMPORTANT — why we do not use the card's `campaign_type` column:
-  card 12207 assigns campaign_type via MOD(ABS(FARM_FINGERPRINT(seller_id)),2), i.e. a
-  deterministic COIN FLIP on the seller id. It is a placeholder, not the real arm
-  (it agrees with the real setup only ~29% of the time). So the experiment arm is
-  derived here from the ADSET NAME, which is how the arms are actually labelled:
+TWO ways to group, both emitted (this is the standard experiment pair):
+  * ITT (intent-to-treat) = the card's `campaign_type`. Its SQL derives it from
+    MOD(ABS(FARM_FINGERPRINT(seller_id)),2) — which looks arbitrary, but it agrees with
+    what sellers ACTUALLY ran 89% of the time (25/28), so it reproduces the real
+    assignment rule. Grouping by assignment is the unbiased comparison.
+  * PER-PROTOCOL = what was actually executed, derived from the ADSET NAME. Biased by
+    self-selection, but it is the only way to split arm-vs-arm inside a B seller.
+  The 11% gap between them is non-compliance (e.g. sellers assigned to catalogue that
+  never built a catalogue adset) and is reported explicitly.
+
+Arm keywords used for the per-protocol split / the arm columns:
      'catalog' / 'cat.' / 'all product'      -> Catalogue arm
      'banner' / 'video' / 'creative' / 'ugc' -> Creative arm
      both keywords                           -> Both (single mixed adset)
@@ -286,7 +292,6 @@ def main():
     uncl = [r for r in final if r.get("level") == "adset" and arm_of(r.get("adset_name")) == "Unclassified"]
     nonai_spend = sum(num(r.get("spend")) for r in final if r.get("level") == "campaign" and r.get("ai_flag") == 0)
     ai_spend = sum(num(r.get("spend")) for r in final if r.get("level") == "campaign" and r.get("ai_flag") == 1)
-    ct_agree = sum(1 for sid in setup if {r["seller_id"]: r.get("campaign_type") for r in final}.get(sid) == setup[sid])
     dq = {
         "rows": len(rows), "finalRows": len(final),
         "partialRows": len(rows) - len(final),
@@ -297,15 +302,76 @@ def main():
         "unclassifiedAdsetSpend": round(sum(num(r.get("spend")) for r in uncl)),
         "unclassifiedNames": sorted({(r.get("adset_name") or "(blank)") for r in uncl})[:12],
         "aiSpend": round(ai_spend), "nonAiSpend": round(nonai_spend),
-        "cardCampaignTypeAgreement": (round(100 * ct_agree / len(setup)) if setup else None),
         "dateMin": min((r["date"] for r in final), default=None),
         "dateMax": max((r["date"] for r in final), default=None),
         "maxDaySinceGoLive": max((r["day_since_go_live"] for r in final), default=None),
     }
 
+    # ---- A/B table (Control A vs Variant B, campaign + adset level) ----------------------
+    # Two groupings: 'itt' = the card's campaign_type (assignment), 'pp' = executed (adset names).
+    # Cell = pooled spend/GMV over `final` rows; S/GMV is None when GMV == 0 (never a div-by-zero).
+    def _cell(rs, level, keyer, want):
+        d = _blank()
+        for r in rs:
+            if r.get("level") != level:
+                continue
+            if keyer(r) != want:
+                continue
+            _acc(d, r, ent=(r.get("adset_id") if level == "adset" else r.get("campaign_id")))
+        p = _pub(d)
+        p["avgSpend"] = (round(d["sp"] / len(d["sellers"])) if d["sellers"] else None)
+        p["sellerIds"] = sorted(d["sellers"])
+        return p
+
+    def _side(r, mode):
+        """A or B for a row, under the chosen grouping."""
+        if mode == "itt":
+            return "A" if r.get("campaign_type") == "Only Creative" else "B"
+        st = setup.get(r["seller_id"])
+        if st is None:
+            return None
+        return "A" if st == "Creative only" else "B"
+
+    ab = {}
+    for mode in ("itt", "pp"):
+        side = lambda r, _m=mode: _side(r, _m)
+        camp = {s: _cell(final, "campaign", side, s) for s in ("A", "B")}
+        adset = {s: _cell(final, "adset", side, s) for s in ("A", "B")}
+        # arm columns: within each side, split adsets by their arm
+        armcol = {}
+        for s in ("A", "B"):
+            for a in ("Creative", "Catalogue", "Both", "Unclassified"):
+                armcol[s + "_" + a] = _cell(
+                    [r for r in final if side(r) == s], "adset",
+                    lambda r: arm_of(r.get("adset_name")), a)
+        ab[mode] = {"campaign": camp, "adset": adset, "arm": armcol}
+
+    # compliance: assignment (itt) vs execution (pp)
+    card_side = {}
+    for r in final:
+        card_side[r["seller_id"]] = "A" if r.get("campaign_type") == "Only Creative" else "B"
+    pp_side = {sid: ("A" if st == "Creative only" else "B") for sid, st in setup.items()}
+    dev = [{"sid": sid, "assigned": card_side.get(sid), "executed": pp_side[sid],
+            "armsRun": sorted(seller_arms.get(sid, []))}
+           for sid in pp_side if card_side.get(sid) != pp_side[sid]]
+    b_assigned_adset = {r["seller_id"] for r in final
+                        if r.get("level") == "adset" and card_side.get(r["seller_id"]) == "B"}
+    b_nocat = sorted(s for s in b_assigned_adset
+                     if not ({"Catalogue", "Both"} & (seller_arms.get(s) or set())))
+    agree_n = sum(1 for sid in pp_side if card_side.get(sid) == pp_side[sid])
+    compliance = {
+        "classified": len(pp_side), "agree": agree_n,
+        "agreePct": (round(100 * agree_n / len(pp_side)) if pp_side else None),
+        "deviations": dev,
+        "bAssignedWithAdsets": len(b_assigned_adset),
+        "bAssignedNoCatalogue": b_nocat,
+    }
+
     out = {
         "generatedAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "card": CARD,
+        "ab": ab,
+        "compliance": compliance,
         "thresholds": SGMV_THRESHOLDS,
         "overall": overall_pub,
         "arms": arms_pub,
