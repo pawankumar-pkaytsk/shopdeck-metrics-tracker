@@ -1725,11 +1725,11 @@ def main():
             churn_cmp['totals'][seg] += 1
             if _r.get('churn_flag') != 1:
                 continue
-            cohort = str(_r.get('churn_cohort') or '')
-            if not cohort:
+            _ccoh = str(_r.get('churn_cohort') or '')   # NB: do NOT name this `cohort` — that name
+            if not _ccoh:                              # holds the ARR-cohort dict used by cards.cohort
                 continue
             try:
-                age = 13 if cohort.endswith('+') else int(cohort[1:])   # M12+ -> 13 (renders as 12+)
+                age = 13 if _ccoh.endswith('+') else int(_ccoh[1:])   # M12+ -> 13 (renders as 12+)
             except ValueError:
                 continue
             sid = str(_r.get('seller_id') or '')
