@@ -89,6 +89,9 @@ jobs:
       - name: Cohort Analysis 1k-5k (card 11838)
         continue-on-error: true
         run: python pipelines/cohort_1k5k_refresh.py
+      - name: Cohort Analysis 1k-5k Google-live (card 12264)
+        continue-on-error: true
+        run: python pipelines/cohort_google_refresh.py
       - name: Troubleshoot SOP Compliance (card 10181)
         continue-on-error: true
         run: python pipelines/ts_sop_refresh.py
