@@ -1,5 +1,7 @@
 .DS_Store
-.claude/
+.claude/*
+!.claude/skills/
+!.claude/launch.json
 node_modules/
 public/
 .vercel/

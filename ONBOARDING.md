@@ -83,7 +83,23 @@ Workflows in `.github/workflows/` (all self-deploy to Vercel at the end):
 - **Card 10469 is ~287k rows**; `bev_refresh` fetches it once (cached) and reuses. Don't add duplicate fetches.
 - Validate after every deploy by curling `https://hits-tracker.xyz/bev_data.json` and checking the fields you changed, since the app is behind Google login (can't screenshot headless).
 
-## 9. Handoff checklist
+## 9. Claude Code skills (`.claude/skills/`)
+
+If the new owner uses Claude Code in this repo, six skills load this knowledge automatically —
+they are the working companion to this document:
+
+| Skill | Use it for |
+|---|---|
+| `metrics-tracker-orientation` | **Start here.** Repo map, architecture, which file/pipeline/card backs each screen. |
+| `metrics-tracker-edit-view` | Editing `index.html` (the JSON-encoded bundler template), reusable components, drilldown modals, browser verification. |
+| `metrics-tracker-pipeline` | Writing/changing a `pipelines/*_refresh.py`, output conventions, verification discipline. |
+| `metrics-tracker-metabase` | Metabase API, the card catalogue, BigQuery dbs/partitions, and the quota workarounds. |
+| `metrics-tracker-data-model` | Metric definitions: 1k-5k, HIT1/HIT2/Revenue, Spend/Live, Google-live, golive multiplier, TvA, churn, S/GMV, cohorts, incentives. |
+| `metrics-tracker-deploy` | Build, manual + CI deploy, the five workflows, and the git-clobber trap. |
+
+They contain no credentials — only paths and secret *names*.
+
+## 10. Handoff checklist
 - [ ] New owner added as GitHub collaborator (write).
 - [ ] Metabase API key issued on the 500 GB-quota account; `METABASE_API_KEY` secret rotated to it.
 - [ ] Google SA has Sheets access; `GOOGLE_SA_KEY` valid.
