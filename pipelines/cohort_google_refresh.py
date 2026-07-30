@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Build cohort_google_data.json — "Cohort Analysis — 1k-5k (Google)".
 
-Exact replica of the 1k-5k cohort heatmap (card 11840 / cohort_1k5k_refresh.py) but
-restricted to GOOGLE-LIVE sellers, so it is a strict subset of the 1k-5k cohort.
+Same grid as the 1k-5k cohort heatmap (card 11840 / cohort_1k5k_refresh.py) but for the
+HIT1 bucket sellers that are GOOGLE-LIVE (a strict subset of the 1k-5k cohort), and
+RE-ANCHORED: W0 is the ISO week of the seller's FIRST GOOGLE SPEND, W1.. follow, and the
+cohort row is the month of that first-google-spend week (not the HIT month).
 
 Google-live (same rule as the dashboard's Spend/Live + golive multiplier):
     has a google_ad_account_id  AND  lifetime google spend > 10
@@ -11,11 +13,9 @@ Google-live (same rule as the dashboard's Spend/Live + golive multiplier):
   * card 7401 (db 23) is the authority used everywhere else in the dashboard, so the seller
     universe is intersected with it. The two agree to within one seller; the delta is reported.
 
-Two spend bases, both emitted (the view toggles between them):
-  * total  — weekly gc_view_3.marketing_spend (Meta + Google). Same metric as section 6, so
-             this column is directly comparable with the all-1k-5k table.
-  * google — weekly google-only spend. The honest basis for a Google read-out, since a
-             Google-live seller's total spend is usually mostly Meta.
+Spend metric: weekly gc_view_3.marketing_spend (Meta + Google) — the same metric as
+section 6, so the cells stay comparable with the all-1k-5k table. Each seller-week's
+google-only spend is carried into the drilldown as an informational column.
 
 Cells per cohort x relative week: t = sellers present, s = spending (> 0), g = >= 3000.
 3K Retention (computed in the view) = g at Wn / s at W0.
@@ -109,12 +109,14 @@ def main():
             "s": sid, "n": str(r.get("company") or ""),
             "sp": round(fnum(r.get("sw_spend"))),
             "gsp": round(fnum(r.get("sw_google_spend"))),
+            "g0": str(r.get("google_start_week") or "")[:10],
+            "hw": str(r.get("hit_week") or "")[:10],
         })
 
     cohorts = sorted(det.keys(), reverse=True)
     out_rows = []
     for cm in cohorts:
-        cells, cellsG, dcell = {}, {}, {}
+        cells, dcell = {}, {}
         for w in sorted(det[cm]):
             sellers = sorted(det[cm][w], key=lambda x: -x["sp"])
             cells[str(w)] = {
@@ -122,13 +124,8 @@ def main():
                 "s": sum(1 for x in sellers if x["sp"] > 0),
                 "g": sum(1 for x in sellers if x["sp"] >= SPEND3K),
             }
-            cellsG[str(w)] = {
-                "t": len(sellers),
-                "s": sum(1 for x in sellers if x["gsp"] > 0),
-                "g": sum(1 for x in sellers if x["gsp"] >= SPEND3K),
-            }
             dcell[str(w)] = sellers
-        out_rows.append({"cohort": cm, "cells": cells, "cellsG": cellsG, "det": dcell})
+        out_rows.append({"cohort": cm, "cells": cells, "det": dcell})
 
     out = {
         "generatedAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
