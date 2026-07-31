@@ -149,6 +149,29 @@ def main():
     gc_data = load_json("gc_data.json", {}) or {}
     by_gc = gc_data.get("byGC", {})
     gc_key = {_key(g): g for g in by_gc}
+    # The HR roster (card 11431) and the assignment data (gc_data.byGC) spell some
+    # names differently — e.g. HR "SOHAN FLOYD LOBO" vs assignment "SOHAN LOBO", or a
+    # duplicated first name ("Dhiraj Kumar Dhiraj Kumar Khandelwal"). An exact-name
+    # lookup silently drops those people: matched=False -> no cur -> no gcDetails ->
+    # they vanish from the L&T person picker. Fall back to first+last token, and ONLY
+    # when it resolves to exactly one GC, so this can never mis-attribute a book.
+    _fl_idx = defaultdict(list)
+    for _g in by_gc:
+        _t = _key(_g).split()
+        if len(_t) >= 2:
+            _fl_idx[(_t[0], _t[-1])].append(_g)
+
+    def resolve_gc(name):
+        k = _key(name)
+        if k in gc_key:
+            return gc_key[k]
+        t = k.split()
+        if len(t) >= 2:
+            c = _fl_idx.get((t[0], t[-1]), [])
+            if len(c) == 1:
+                print(f"[lt] name fallback: '{_norm(name)}' -> '{c[0]}'")
+                return c[0]
+        return None
     detail = (load_json("gc_detail_data.json", {}) or {}).get("detail", {})
     ts_sellers = (load_json("ts_data.json", {}) or {}).get("sellers", {})
     golive = (load_json("golive_data.json", {}) or {}).get("sellers", {})
@@ -268,7 +291,7 @@ def main():
     out_gcs = []
     for g in sorted(new_gcs, key=lambda x: x["doj"], reverse=True):
         k = _key(g["name"])
-        canon = gc_key.get(k)
+        canon = resolve_gc(g["name"])
         rec = dict(g)
         rec["matched"] = bool(canon)
         cur = None
@@ -350,7 +373,7 @@ def main():
             done = [t for t in lst if str(t.get("status") or "").lower() in ("completed", "closed")]
             sla = sum(1 for t in done if t.get("tat") is not None and t.get("sla") is not None and t["tat"] <= t["sla"])
             return {"tot": len(lst), "done": len(done), "sla": sla}
-        canon = gc_key.get(k); sids = [s["id"] for s in by_gc.get(canon, {}).get("sellers", [])] if canon else []
+        canon = resolve_gc(g["name"]); sids = [s["id"] for s in by_gc.get(canon, {}).get("sellers", [])] if canon else []
         golw = sum(1 for sid in sids if _wk_of((golive.get(sid) or {}).get("g")) == cur_yw)
         snap[g["empId"] or k] = {
             "name": g["name"], "empId": g["empId"], "doj": g["doj"],
@@ -372,7 +395,7 @@ def main():
     _gc_sids = {}
     for g in out_gcs:
         if g.get("matched"):
-            canon = gc_key.get(_key(g["name"]))
+            canon = resolve_gc(g["name"])
             _gc_sids[g["empId"] or _key(g["name"])] = [s["id"] for s in by_gc.get(canon, {}).get("sellers", [])] if canon else []
     # floor the backfill at NEW_SINCE (Jan 2026), matching the Month-Wise range — these are new GCs,
     # so pre-2026 golives of their current book aren't relevant history.
@@ -412,7 +435,7 @@ def main():
     for g in out_gcs:
         if not g.get("matched"):
             continue
-        k = _key(g["name"]); canon = gc_key.get(k); pk = g["empId"] or k
+        k = _key(g["name"]); canon = resolve_gc(g["name"]); pk = g["empId"] or k
         rows = []
         for s in by_gc.get(canon, {}).get("sellers", []):
             sid = s["id"]; gdate = (golive.get(sid) or {}).get("g") or ""
