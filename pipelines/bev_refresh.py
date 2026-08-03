@@ -14,7 +14,7 @@ Channel of a seller: meta = meta yest spend > ₹1; google = has a Google ad acc
 
 Run: cd ~/shopdeck-metrics-site && python3 ~/metabase-arr-refresh/bev_refresh.py --push
 """
-import json, os, sys, subprocess, urllib.request, urllib.parse, datetime, glob, re
+import json, os, sys, subprocess, urllib.request, urllib.parse, datetime, glob, re, calendar
 from collections import defaultdict, Counter
 
 
@@ -1329,7 +1329,23 @@ def main():
         is_hit2_of[sid] = str(r.get('hit2')).strip() in ('1', '1.0', 'True', 'true')
         name_of[sid] = str(r.get('seller_name') or '')
     # per-seller per-month avg channel ARR from card 10469 (Meta/Google/All ARR, ~6-month history)
-    smon = {}  # sid -> monthKey(int YYYYMM) -> {'m':sum,'g':sum,'t':sum,'d':days}
+    # A seller's monthly ARR = sum of daily ARR / days_in_period(month), replicating card 11020:
+    #   complete month  -> calendar days in that month
+    #   current month   -> days from the 1st to the start of the current ISO week
+    # and rows inside the current (incomplete) ISO week are excluded, exactly as 11020 does.
+    # NB: dividing by days-WITH-DATA instead inflates every cell (a seller live 20 of 31 days
+    # looked ~55% better) and broke comparability with the Targets, which are set on this basis.
+    _aw_today = datetime.date.today()
+    _aw_cur_ym = _aw_today.year * 100 + _aw_today.month
+    _aw_week_start = _aw_today - datetime.timedelta(days=_aw_today.weekday())
+    _aw_month_start = _aw_today.replace(day=1)
+
+    def _days_in_period(mk):
+        if mk < _aw_cur_ym:
+            return calendar.monthrange(mk // 100, mk % 100)[1]
+        return max((_aw_week_start - _aw_month_start).days, 0)
+
+    smon = {}  # sid -> monthKey(int YYYYMM) -> {'m':sum,'g':sum,'t':sum,'d':days-with-data}
     arr_window = {'from': '', 'to': ''}
     try:
         rows10469 = get10469()   # reuse the single shared fetch from the TvA block
@@ -1343,6 +1359,11 @@ def main():
                 continue
             ds = str(r.get('date') or '')[:10]
             if not ds:
+                continue
+            try:
+                if datetime.date.fromisoformat(ds) >= _aw_week_start:
+                    continue                      # current incomplete ISO week — 11020 drops it
+            except ValueError:
                 continue
             ad.append(ds)
             mk = int(ds[:4]) * 100 + int(ds[5:7])
@@ -1370,8 +1391,9 @@ def main():
                     continue
                 for mk, v in smon.get(sid, {}).items():
                     age = (mk // 100 - h1 // 100) * 12 + (mk % 100 - h1 % 100)
-                    if 0 <= age < len(ARR_MCOLS) and v['d']:
-                        mm, gg, tt = v['m'] / v['d'], v['g'] / v['d'], v['t'] / v['d']
+                    _dip = _days_in_period(mk)
+                    if 0 <= age < len(ARR_MCOLS) and v['d'] and _dip:
+                        mm, gg, tt = v['m'] / _dip, v['g'] / _dip, v['t'] / _dip
                         acc[age]['m'] += mm; acc[age]['g'] += gg; acc[age]['t'] += tt
                         acc[age]['det'].append({'s': sid, 'n': name_of.get(sid, ''), 'meta': round(mm), 'google': round(gg), 'both': round(tt)})
             cells = {ch: {} for ch in ('meta', 'google', 'both')}
