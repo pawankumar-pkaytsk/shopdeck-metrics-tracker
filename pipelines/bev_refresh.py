@@ -1378,12 +1378,16 @@ def main():
             counts, detail = {}, {}
             for a in range(len(ARR_MCOLS)):
                 mc = 'M%d' % a
-                has = bool(acc[a]['det'])
-                cells['meta'][mc] = round(acc[a]['m'] / n) if (n and has) else None
-                cells['google'][mc] = round(acc[a]['g'] / n) if (n and has) else None
-                cells['both'][mc] = round(acc[a]['t'] / n) if (n and has) else None
-                counts[mc] = len(acc[a]['det'])
-                if has:
+                k = len(acc[a]['det'])          # sellers that actually have ARR at this age
+                # Denominator is k, NOT the full cohort n: a cohort member with no ARR row for
+                # that month has usually not reached that age yet (right-censoring), so counting
+                # them as 0 would deflate later ages. k is also exactly the drilldown row count,
+                # so every cell == the average of its own seller list.
+                cells['meta'][mc] = round(acc[a]['m'] / k) if k else None
+                cells['google'][mc] = round(acc[a]['g'] / k) if k else None
+                cells['both'][mc] = round(acc[a]['t'] / k) if k else None
+                counts[mc] = k
+                if k:
                     detail[mc] = sorted(acc[a]['det'], key=lambda x: -x['both'])
             rows.append({'ym': '%d-%02d' % (h1 // 100, h1 % 100), 'label': MON3b[h1 % 100 - 1] + '-' + str(h1 // 100)[2:],
                          'n': n, 'cells': cells, 'counts': counts, 'detail': detail})
@@ -1398,66 +1402,16 @@ def main():
         },
     }
     print(f"[bev2] ARR cohort (channel): hit12={len(arr_cohort['variants']['hit12'])} hit1={len(arr_cohort['variants']['hit1'])} hit2={len(arr_cohort['variants']['hit2'])} rows")
-    # HIT1+HIT2 combined 'both' must match the authoritative ARR cohort (card 11020, full history).
-    # Use 11020 per-cell values for 'both'; split Meta/Google proportionally via the 10469 ratio.
+    # Card 11020 (the authoritative published ARR cohort) is kept as a REFERENCE ROW only.
+    # Cells stay as computed above from card 10469 per-seller ARR, so every cell is exactly the
+    # average of the seller list its drilldown shows. Previously the cells were overwritten with
+    # 11020 (and HIT1/HIT2 with a weighted split of it) while `detail` kept the 10469 sellers,
+    # which is why a cell never matched its own drilldown.
     _ref11020 = {r['ym']: r['v'] for r in cohort.get('rows', [])}
+    arr_cohort['ref11020'] = {}
     for _row in arr_cohort['variants']['hit12']:
         _rv = _ref11020.get(_row['ym'].replace('-', ''), {})
-        for _mc in ARR_MCOLS:
-            _both = _rv.get(_mc)
-            _m0, _g0 = _row['cells']['meta'].get(_mc), _row['cells']['google'].get(_mc)
-            if _both is None:
-                _row['cells']['both'][_mc] = None; _row['cells']['meta'][_mc] = None; _row['cells']['google'][_mc] = None
-            else:
-                _row['cells']['both'][_mc] = _both
-                if _m0 is not None and _g0 is not None and (_m0 + _g0) > 0:
-                    _mm = round(_both * _m0 / (_m0 + _g0)); _row['cells']['meta'][_mc] = _mm; _row['cells']['google'][_mc] = _both - _mm
-                else:
-                    _row['cells']['meta'][_mc] = None; _row['cells']['google'][_mc] = None
-    # Anchor HIT1-only / HIT2-only to the authoritative combined: keep 11020 total, split by the
-    # 10469 proportion so (hit1*n1 + hit2*n2)/n_all reconciles to the combined value.
-    _h12 = {r['ym']: r for r in arr_cohort['variants']['hit12']}
-    _h1 = {r['ym']: r for r in arr_cohort['variants']['hit1']}
-    _h2 = {r['ym']: r for r in arr_cohort['variants']['hit2']}
-    def _shr(row, mc):
-        b = row['cells']['both'].get(mc); m = row['cells']['meta'].get(mc)
-        return (m / b) if (b and m is not None and b > 0) else None
-    def _setc(row, mc, val):
-        if row is None:
-            return
-        if val is None:
-            row['cells']['both'][mc] = None; row['cells']['meta'][mc] = None; row['cells']['google'][mc] = None; return
-        sh = _shr(row, mc); row['cells']['both'][mc] = val
-        if sh is not None:
-            _mm2 = round(val * sh); row['cells']['meta'][mc] = _mm2; row['cells']['google'][mc] = val - _mm2
-        else:
-            row['cells']['meta'][mc] = None; row['cells']['google'][mc] = None
-    for _ym, _c in _h12.items():
-        _r1, _r2 = _h1.get(_ym), _h2.get(_ym)
-        _n1 = _r1['n'] if _r1 else 0; _n2 = _r2['n'] if _r2 else 0
-        # per-cohort fallback split ratio from cells that have both sub-values (original 10469)
-        _S1 = _S2 = 0.0
-        for _mc in ARR_MCOLS:
-            _a = _r1['cells']['both'].get(_mc) if _r1 else None
-            _b = _r2['cells']['both'].get(_mc) if _r2 else None
-            if _a is not None and _b is not None:
-                _S1 += _a * _n1; _S2 += _b * _n2
-        _r1fb = (_S1 / (_S1 + _S2)) if (_S1 + _S2) > 0 else ((_n1 / (_n1 + _n2)) if (_n1 + _n2) else 0.5)
-        for _mc in ARR_MCOLS:
-            _V = _c['cells']['both'].get(_mc)
-            _s1 = (_r1['cells']['both'].get(_mc) * _n1) if (_r1 and _r1['cells']['both'].get(_mc) is not None) else None
-            _s2 = (_r2['cells']['both'].get(_mc) * _n2) if (_r2 and _r2['cells']['both'].get(_mc) is not None) else None
-            _tot = (_s1 or 0) + (_s2 or 0)
-            if _V is None:
-                _setc(_r1, _mc, None); _setc(_r2, _mc, None); continue
-            _total = _V * (_n1 + _n2)
-            if _tot <= 0:
-                # combined present but no per-cell 10469 split -> use cohort fallback ratio (fills e.g. Feb M0)
-                _setc(_r1, _mc, round(_total * _r1fb / _n1) if _n1 else None)
-                _setc(_r2, _mc, round(_total * (1 - _r1fb) / _n2) if _n2 else None)
-                continue
-            _setc(_r1, _mc, round(_total * (_s1 or 0) / _tot / _n1) if _n1 else None)
-            _setc(_r2, _mc, round(_total * (_s2 or 0) / _tot / _n2) if _n2 else None)
+        arr_cohort['ref11020'][_row['ym']] = {mc: _rv.get(mc) for mc in ARR_MCOLS}
     # ---- ARR buckets: Top 20% / Mid 20% / Bottom 60% of sellers by weekly ARR (card 10469) ----
     arr_buckets = {'weeks': [], 'variants': {}}
     try:
