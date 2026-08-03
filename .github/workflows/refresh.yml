@@ -114,6 +114,10 @@ jobs:
         continue-on-error: true
         run: python pipelines/creative_test_refresh.py
 
+      - name: Google seller book (cards 5207 + 7401, depends on ts/scaling)
+        continue-on-error: true
+        run: python pipelines/google_sellers_refresh.py
+
       - name: Snapshot (dated, compressed archive for time-travel)
         continue-on-error: true
         run: python pipelines/snapshot.py
