@@ -346,6 +346,29 @@ def main():
             for mk in revenue_cohort['detail'][k]:
                 revenue_cohort['detail'][k][mk].sort(key=lambda x: -x['arr'])
         print(f"[cohort] revenue cohort detail (card {REVENUE_COHORT_DETAIL_CARD}): {sum(len(v) for v in revenue_cohort['detail'].values())} ym cells")
+
+        # Card 11020 moved to a whole-cohort denominator on 2026-08-03 (SUM/COUNT(DISTINCT
+        # seller_id) instead of AVG). Card 12072 has NOT been changed and still returns AVG, so
+        # its cells divide by sellers-with-data-at-that-age. Recompute them here from the 12186
+        # seller-level detail over the same cohort seller_count, otherwise this table and the HIT
+        # table sit side by side on two different denominators and cannot be compared.
+        # If 12072's own SQL is later updated the same way, this block becomes a no-op.
+        _rebased = 0
+        for _row in revenue_cohort['rows']:
+            _n = _row.get('n') or 0
+            _det = revenue_cohort['detail'].get(_row['ym'], {})
+            if not _n:
+                continue
+            for _mc in mcols:
+                _lst = _det.get(_mc)
+                if not _lst:
+                    _row['v'][_mc] = None
+                    continue
+                _row['v'][_mc] = round(sum(x['arr'] for x in _lst) / _n)
+                _rebased += 1
+        revenue_cohort['denominator'] = 'cohortSellerCount'
+        print(f"[cohort] revenue cohort re-based onto the cohort seller_count "
+              f"(card 11020's new denominator): {_rebased} cells recomputed from card {REVENUE_COHORT_DETAIL_CARD}")
     except Exception as _e:
         print(f"[cohort] revenue cohort detail (card {REVENUE_COHORT_DETAIL_CARD}) failed: {_e}")
 
@@ -1401,13 +1424,18 @@ def main():
             for a in range(len(ARR_MCOLS)):
                 mc = 'M%d' % a
                 k = len(acc[a]['det'])          # sellers that actually have ARR at this age
-                # Denominator is k, NOT the full cohort n: a cohort member with no ARR row for
-                # that month has usually not reached that age yet (right-censoring), so counting
-                # them as 0 would deflate later ages. k is also exactly the drilldown row count,
-                # so every cell == the average of its own seller list.
-                cells['meta'][mc] = round(acc[a]['m'] / k) if k else None
-                cells['google'][mc] = round(acc[a]['g'] / k) if k else None
-                cells['both'][mc] = round(acc[a]['t'] / k) if k else None
+                # Denominator is the FULL cohort n, not k. Card 11020 changed on 2026-08-03 from
+                #   ROUND(AVG(CASE WHEN cohort_month_num = a THEN arr END), 0)      -- skips NULLs -> /k
+                # to
+                #   SAFE_DIVIDE(ROUND(SUM(CASE WHEN ... THEN arr END), 0), COUNT(DISTINCT seller_id))
+                # i.e. every age divides by the cohort's own seller_count. A cohort member with no
+                # ARR row at that age now counts as 0 rather than being dropped, so later ages fall
+                # as sellers churn instead of staying flat on a shrinking base.
+                # CONSEQUENCE: a cell is no longer the plain average of its drilldown list (that
+                # list has k rows, the divisor is n). counts[mc] carries k so the UI can say so.
+                cells['meta'][mc] = round(acc[a]['m'] / n) if (n and k) else None
+                cells['google'][mc] = round(acc[a]['g'] / n) if (n and k) else None
+                cells['both'][mc] = round(acc[a]['t'] / n) if (n and k) else None
                 counts[mc] = k
                 if k:
                     detail[mc] = sorted(acc[a]['det'], key=lambda x: -x['both'])
