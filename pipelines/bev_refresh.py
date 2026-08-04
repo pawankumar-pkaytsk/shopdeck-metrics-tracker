@@ -1451,6 +1451,69 @@ def main():
             'hit2': build_arr_variant(lambda s: is_hit2_of.get(s)),
         },
     }
+
+    # ---- Day-on-day spend & ARR trend (card 10469), overall + per GM ----
+    # Sits above section 1. Daily rows only; the view aggregates to ISO weeks client-side so one
+    # array serves both granularities. Spend is a flow (period = SUM); ARR is an annualised rate
+    # (period = MEAN of the daily values), the same treatment the ARR cohort uses when it divides
+    # a month's summed daily ARR by days_in_period.
+    # GM attribution: seller -> GL comes from the hitsMap/7753 mapping the rest of the dashboard
+    # uses (team[sid]['gc'] = growth_consultant_name falling back to growth_lead_name), then
+    # GL -> GM from gc2gm_all (card 7753). Deriving GM from the GL keeps a GL's whole book inside
+    # one GM instead of letting it split.
+    TREND_DAYS = 180
+    _tr_dates = [d for d in good_dates if d][-TREND_DAYS:]
+    # NB gc2gm_all values pass through clean(), so a blank GM is stored as the literal string
+    # 'Unassigned' — truthy. Treat that as absent or 45 of 214 sellers fall into an Unassigned
+    # bucket while their hitsMap GM is perfectly good.
+    def _named(v):
+        v = (v or '').strip()
+        return v if v and v != 'Unassigned' else ''
+
+    _gm_of, _gl_of = {}, {}
+    for _sid in sids:
+        _t = team.get(_sid) or {}
+        _gl = _named(_t.get('gc')) or 'Unassigned'
+        _gm = _named(gc2gm_all.get(_gl)) or _named(_t.get('gm')) or 'Unassigned'
+        _gl_of[_sid] = _gl
+        _gm_of[_sid] = _gm
+
+    def _mk_series():
+        z = len(_tr_dates)
+        return {'sm': [0.0] * z, 'sg': [0.0] * z, 'am': [0.0] * z, 'ag': [0.0] * z}
+
+    _tr = {'__all__': _mk_series()}
+    _tr_sellers = {'__all__': set()}
+    for _i, _d in enumerate(_tr_dates):
+        for _r in by_date.get(_d, []):
+            _sid = str(_r.get('seller_id') or '').strip()
+            if _sid not in sids:
+                continue
+            _sm, _sg = fnum(_r.get('spend_meta')), fnum(_r.get('spend_google'))
+            _am, _ag = fnum(_r.get('arr_meta')), fnum(_r.get('arr_google'))
+            if not (_sm or _sg or _am or _ag):
+                continue
+            for _k in ('__all__', _gm_of.get(_sid, 'Unassigned')):
+                _s = _tr.setdefault(_k, _mk_series())
+                _s['sm'][_i] += _sm; _s['sg'][_i] += _sg
+                _s['am'][_i] += _am; _s['ag'][_i] += _ag
+                _tr_sellers.setdefault(_k, set()).add(_sid)
+    dod_trend = {
+        'days': _tr_dates,
+        'gms': sorted(k for k in _tr if k != '__all__'),
+        'series': {k: {m: [round(x) for x in v[m]] for m in ('sm', 'sg', 'am', 'ag')}
+                   for k, v in _tr.items()},
+        'sellers': {k: len(v) for k, v in _tr_sellers.items()},
+        'glByGm': {},
+        'note': ('spend = SUM over the period · ARR = MEAN of the daily values '
+                 '(ARR is an annualised rate, not a flow)'),
+    }
+    for _sid in sids:                       # which GLs sit under each GM, for the dropdown hint
+        dod_trend['glByGm'].setdefault(_gm_of[_sid], set()).add(_gl_of[_sid])
+    dod_trend['glByGm'] = {k: sorted(v) for k, v in dod_trend['glByGm'].items()}
+    print(f"[bev2] day-on-day trend: {len(_tr_dates)} settled days "
+          f"({_tr_dates[0] if _tr_dates else '-'} .. {_tr_dates[-1] if _tr_dates else '-'}) · "
+          f"{len(dod_trend['gms'])} GMs · {dod_trend['sellers'].get('__all__', 0)} sellers with activity")
     print(f"[bev2] ARR cohort (channel): hit12={len(arr_cohort['variants']['hit12'])} hit1={len(arr_cohort['variants']['hit1'])} hit2={len(arr_cohort['variants']['hit2'])} rows")
     # Card 11020 (the authoritative published ARR cohort) is kept as a REFERENCE ROW only.
     # Cells stay as computed above from card 10469 per-seller ARR, so every cell is exactly the
@@ -1805,6 +1868,7 @@ def main():
         'googleHitConvToggle': google_hit_conv_toggle,
         'googleWeeklyByHit': google_weekly_by_hit,
         'arrCohort': arr_cohort,
+        'dodTrend': dod_trend,
         'arrBuckets': arr_buckets,
         'hit2ArrSpendMom': hit2_mom_perf,
         'hit2ArrSpendWow': hit2_wow_perf,
