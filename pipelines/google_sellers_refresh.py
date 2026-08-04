@@ -174,14 +174,34 @@ def main():
     hits = ts.get("hitsMap", {})
     sc = scaling.get("sellers", {})
     base = {sid: m for sid, m in hits.items() if not m.get("good")}
-    # The book covers EVERY assigned 1k-5k seller, not only those with a google ad account:
-    # "total assigned" is a column, so the roll-up denominator must be the whole book. Having a
-    # google ad account is a per-seller flag (gaMade) and a column of its own instead.
-    gsids = sorted(base)
+
+    # HIT1 = the assigned book (hitsMap keeps each seller's LATEST hit_master_data row and only
+    # where team='HITS'). HIT2 = hit2=1 excluding good sellers, taken straight from card 10453.
+    # They are NOT disjoint — a seller can be both — so HIT1+HIT2 is the union, matching how the
+    # Weekly Metrics and cohort views define these buckets.
+    # This matters: converting to HIT2 flips team off HITS, so 38 of the 42 HIT2 sellers have a
+    # NULL latest team and fall out of hitsMap entirely. Reading only the book hides them.
+    _TRUE = ("1", "1.0", "True", "true")
+    h2ids, name10453 = set(), {}
+    try:
+        for r in fetch("/api/card/10453/query/json"):
+            _s = str(r.get("seller_id") or "").strip()
+            if not _s:
+                continue
+            if str(r.get("seller_name") or "").strip():
+                name10453[_s] = str(r.get("seller_name")).strip()
+            if str(r.get("hit2")).strip() in _TRUE and str(r.get("good_seller")).strip() not in _TRUE:
+                h2ids.add(_s)
+        print(f"[gsellers] card 10453: HIT2 population {len(h2ids)} "
+              f"({len(h2ids & set(base))} of them also inside the assigned book)")
+    except Exception as ex:
+        print(f"[gsellers] card 10453 failed ({ex}) — HIT2 toggle will be empty")
+
+    gsids = sorted(set(base) | h2ids)
     gaids = sorted(sid for sid in gsids if str(sc.get(sid, {}).get("ga") or "").strip())
-    print(f"[gsellers] assigned 1k-5k {len(gsids)} · google assets created {len(gaids)}")
+    print(f"[gsellers] rows {len(gsids)} = HIT1 {len(base)} + HIT2 {len(h2ids)} - overlap {len(set(base) & h2ids)}")
     if not gsids:
-        print("[gsellers] no assigned sellers — aborting without writing")
+        print("[gsellers] no sellers — aborting without writing")
         return
 
     # Previous output, used as a no-clobber fallback for every remote source below. BigQuery
@@ -387,14 +407,19 @@ def main():
                           and w1p > PNL_HIT and w2p > PNL_SUBJ)
         rows_out.append({
             "s": sid,
-            "n": str(meta.get("n") or "").strip(),
+            "n": str(meta.get("n") or "").strip() or name10453.get(sid, ""),
+            "h1": sid in base,          # on the assigned 1k-5k book
+            "h2": sid in h2ids,         # hit2 = 1 (overlaps h1 by design)
             "ga": str(sr.get("ga") or ""),
             "gl": roles[sid].get("gl", ""), "gm": roles[sid].get("gm", ""),
             "cl": roles[sid].get("cl", ""), "ggl": roles[sid].get("ggl", ""),
             "life": None if life is None else round(life, 2),
             "ysp": None if ysp is None else round(ysp, 2),
             "last7": None if last7 is None else round(last7, 2),
-            "gaMade": bool(str(sr.get("ga") or "").strip()),
+            # scaling_data only carries the sellers it tracks, so fall back to card 7401's
+            # google_ad_account_id — the two agree exactly on the assigned book.
+            "gaMade": bool(str(sr.get("ga") or "").strip()
+                           or str(c.get("google_ad_account_id") or "").strip()),
             "live": bool(life is not None and life > LIVE_MIN),
             "spending": bool(ysp is not None and ysp > YEST_MIN),
             "k3": bool(last7 is not None and last7 > SPEND_GATE),
@@ -417,7 +442,20 @@ def main():
         "weeks": {"w1": (weeks[0] if weeks else ""), "w2": ""},
         "rows": rows_out,
         "dq": {
-            "base1k5k": len(base), "totalAssigned": len(gsids), "googleAssetsCreated": len(gaids),
+            "base1k5k": len(base), "totalAssigned": len(base), "googleAssetsCreated": len(gaids),
+            # per-bucket headline counts. HIT2 rows carry no GL/CL mapping and no weekly google
+            # PNL, so the view shows only these four for HIT2 / HIT1+HIT2.
+            "buckets": {
+                bk: {
+                    "total": sum(1 for r in rows_out if pick(r)),
+                    "gaMade": sum(1 for r in rows_out if pick(r) and r["gaMade"]),
+                    "live": sum(1 for r in rows_out if pick(r) and r["live"]),
+                    "spending": sum(1 for r in rows_out if pick(r) and r["spending"]),
+                }
+                for bk, pick in (("hit1", lambda r: r["h1"]),
+                                 ("hit2", lambda r: r["h2"]),
+                                 ("hit12", lambda r: r["h1"] or r["h2"]))
+            },
             "pnlCovered": len(gpnl), "pnlCarriedForward": carried, "spendCovered": len(g7401),
             # measured off the emitted rows, not the fetch step: a quota-failed role query
             # still yields coverage via the carry-forward above, and dq must say so.
