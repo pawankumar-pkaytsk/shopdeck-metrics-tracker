@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """Build google_sellers_data.json — Leadership -> Bird's Eye View -> Google -> Google Seller Book.
 
-Population: 1k-5k sellers (ts_data.json hitsMap, good=0) whose GOOGLE ad account is made
-(scaling_data.json sellers[sid].ga non-empty). One row per seller.
+Population: EVERY assigned 1k-5k seller (ts_data.json hitsMap, good=0). One row per seller.
+Having a google ad account is a flag on the row, not an entry condition, because "total assigned"
+is one of the roll-up columns and so has to be the denominator.
 
 Columns / definitions
+  gaMade    : google ad account exists     (scaling_data.json .ga, i.e. a non-empty
+              nushop.userprofiles.google_ad_accounts entry) -> "total google assets created"
   live      : lifetime google spend > 10   (card 7401 total_marketing_spend_with_tax)
-  spending  : google spend yesterday       (card 7401 yesterday_spend)
+  spending  : google spend yesterday > 1   (card 7401 yesterday_spend) -> "Yesterday spending"
   last7     : google spend last 7 days     (card 7401 last_7_days_spend)
   k3 (3K)   : last7 > 3540                 (ts_data.json spendThreshold)
+  Spend/Live: SUM(yesterday google spend) / COUNT(live sellers) — a rupee figure, pooled, never
+              an average of per-seller ratios.
 
 Roles — resolved in the SAME order and with the same meaning as the rest of the dashboard,
 so this table agrees with every other Bird's-Eye drilldown:
@@ -51,7 +56,7 @@ recorded in dq.card11011 and surfaced in the view's footnote.
 
 Run: cd ~/shopdeck-metrics-site && python3 pipelines/google_sellers_refresh.py
 """
-import json, os, re, sys, datetime, urllib.request, subprocess
+import json, os, re, sys, datetime, urllib.request, urllib.error, subprocess
 from concurrent.futures import ThreadPoolExecutor
 
 REPO = os.path.expanduser(os.environ.get("REPO_DIR", "~/shopdeck-metrics-site"))
@@ -64,6 +69,7 @@ PNL_HIT = 5            # potential / objective threshold
 PNL_SUBJ = 3           # subjective threshold on w-2
 HEALTH_FLOOR = -20     # bucket-health floor
 LIVE_MIN = 10          # lifetime google spend > 10 => "live"
+YEST_MIN = 1           # yesterday google spend > 1 => counted in "Yesterday spending"
 
 
 def creds():
@@ -76,6 +82,12 @@ def creds():
 
 
 def req(url, method="GET", body=None, H=None, timeout=900):
+    """Retry 5xx and timeouts; never retry a 4xx.
+
+    A BigQuery quota rejection comes back as HTTP 400 and is not transient — retrying it just
+    burns the backoff. With 119 per-seller card-5207 calls and 3 escalating passes that turned a
+    hard 'Daily quota exceeded' into a ~100 minute no-op run.
+    """
     import time as _t
     data = json.dumps(body).encode() if body is not None else None
     r = urllib.request.Request(url, data=data, method=method, headers=H or {})
@@ -84,6 +96,11 @@ def req(url, method="GET", body=None, H=None, timeout=900):
         try:
             with urllib.request.urlopen(r, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as ex:
+            if 400 <= ex.code < 500:
+                raise
+            last = ex
+            _t.sleep(3 * (attempt + 1))
         except Exception as ex:
             last = ex
             _t.sleep(3 * (attempt + 1))
@@ -128,17 +145,50 @@ def main():
                 {"username": email, "password": pw}, {"Content-Type": "application/json"})["id"]}
     H = {"Content-Type": "application/json", **AUTH}
 
+    # The api-key path forces a FRESH BigQuery scan, so it is the first thing to fail when a
+    # daily quota is spent (db 6 and db 23 both hit this routinely). A session token returns
+    # Metabase's CACHED result for the same card, which is good enough for every source here.
+    # Try the key first, fall back to the token on any 4xx. Same trick as revival/lt/gc_view/kae.
+    _sess = {}
+
+    def _sess_hdr():
+        if "h" not in _sess:
+            tok = req(url + "/api/session", "POST", {"username": email, "password": pw},
+                      {"Content-Type": "application/json"})["id"]
+            _sess["h"] = {"X-Metabase-Session": tok, "Content-Type": "application/json"}
+            print("[gsellers] opened a session token for cached-result fallback")
+        return _sess["h"]
+
+    def fetch(path, body=None, timeout=900):
+        try:
+            return req(f"{url}{path}", "POST", body if body is not None else {}, H, timeout)
+        except urllib.error.HTTPError as ex:
+            if not (400 <= ex.code < 500):
+                raise
+            return req(f"{url}{path}", "POST", body if body is not None else {},
+                       _sess_hdr(), timeout)
+
     # ---- population: 1k-5k (good=0) with a google ad account ----
     ts = load("ts_data.json")
     scaling = load("scaling_data.json")
     hits = ts.get("hitsMap", {})
     sc = scaling.get("sellers", {})
     base = {sid: m for sid, m in hits.items() if not m.get("good")}
-    gsids = sorted(sid for sid in base if str(sc.get(sid, {}).get("ga") or "").strip())
-    print(f"[gsellers] 1k-5k base {len(base)} · google account made {len(gsids)}")
+    # The book covers EVERY assigned 1k-5k seller, not only those with a google ad account:
+    # "total assigned" is a column, so the roll-up denominator must be the whole book. Having a
+    # google ad account is a per-seller flag (gaMade) and a column of its own instead.
+    gsids = sorted(base)
+    gaids = sorted(sid for sid in gsids if str(sc.get(sid, {}).get("ga") or "").strip())
+    print(f"[gsellers] assigned 1k-5k {len(gsids)} · google assets created {len(gaids)}")
     if not gsids:
-        print("[gsellers] no google sellers — aborting without writing")
+        print("[gsellers] no assigned sellers — aborting without writing")
         return
+
+    # Previous output, used as a no-clobber fallback for every remote source below. BigQuery
+    # quota (db 6 and db 23 both) is a routine failure here, and a quota-failed fetch must degrade
+    # to yesterday's value rather than silently zero a column.
+    prev = load("google_sellers_data.json", {})
+    prev_row = {r["s"]: r for r in (prev.get("rows") or [])}
 
     inlist = ",".join("'%s'" % s.replace("'", "") for s in gsids)
 
@@ -165,7 +215,7 @@ def main():
     # ---- (2) card 7753 fills whatever hitsMap left blank (same precedence as ts_refresh) ----
     m7753 = {}
     try:
-        for r in req(f"{url}/api/card/7753/query/json", "POST", {}, H):
+        for r in fetch("/api/card/7753/query/json"):
             sid = str(r.get("seller_id") or "").strip()
             if sid in roles:
                 m7753[sid] = r
@@ -195,8 +245,7 @@ def main():
         WHERE sm.seller_id IN ({inlist})
           AND sm.manager_type IN ({",".join("'%s'" % k for k in ROLE_OF)})
         """
-        rr = req(f"{url}/api/dataset", "POST",
-                 {"database": 6, "type": "native", "native": {"query": sql}}, H)
+        rr = fetch("/api/dataset", {"database": 6, "type": "native", "native": {"query": sql}})
         for sid, mt, nm in rr["data"]["rows"]:
             sid = str(sid)
             k = ROLE_OF.get(str(mt))
@@ -213,6 +262,14 @@ def main():
               " · ".join(f"{k.upper()} {role_cov[k]}/{len(gsids)}" for k in ("cl", "ggl", "ggm")))
     except Exception as ex:
         print(f"[gsellers] seller_managers role query failed: {ex}")
+    _role_carried = 0
+    for sid in gsids:                       # carry any role the live sources could not supply
+        for k in ("cl", "gl", "gm", "ggl"):
+            if not roles[sid].get(k) and (prev_row.get(sid) or {}).get(k):
+                roles[sid][k] = prev_row[sid][k]
+                _role_carried += 1
+    if _role_carried:
+        print(f"[gsellers] carried {_role_carried} role names forward from the previous file")
     for k in ("gl", "gm"):
         role_cov[k] = sum(1 for sid in gsids if roles[sid].get(k))
     print(f"[gsellers] final roles: " +
@@ -221,7 +278,7 @@ def main():
     # ---- google spend: card 7401 (lifetime / yesterday / last-7) ----
     g7401 = {}
     try:
-        for r in req(f"{url}/api/card/7401/query/json", "POST", {}, H):
+        for r in fetch("/api/card/7401/query/json"):
             sid = str(r.get("seller_id") or "").strip()
             if sid in roles:
                 g7401[sid] = r
@@ -236,7 +293,7 @@ def main():
         body = {"parameters": [{"type": "string/=",
                                 "target": ["variable", ["template-tag", "seller_id"]], "value": sid}]}
         try:
-            rows = req(f"{url}/api/card/5207/query/json", "POST", body, H, timeout=300)
+            rows = fetch("/api/card/5207/query/json", body, timeout=300)
         except Exception:
             return sid, None
         rows = [r for r in rows if str(r.get("week_end_date") or "")[:10]
@@ -257,32 +314,31 @@ def main():
 
     gpnl = {}
     with ThreadPoolExecutor(max_workers=4) as ex:
-        for sid, v in ex.map(q5207, gsids):
+        for sid, v in ex.map(q5207, gaids):     # only a google-account holder can have google PNL
             if v:
                 gpnl[sid] = v
-    print(f"[gsellers] card 5207 pass 1: {len(gpnl)}/{len(gsids)}")
+    print(f"[gsellers] card 5207 pass 1: {len(gpnl)}/{len(gaids)}")
 
     # db 23 throttles under concurrency and q5207 swallows the failure, so a first pass can come
     # back with a fraction of the sellers. Retry the misses with less concurrency before accepting.
     for rnd, workers in ((2, 2), (3, 1)):
-        miss = [s for s in gsids if s not in gpnl]
+        miss = [s for s in gaids if s not in gpnl]
         if not miss:
             break
         with ThreadPoolExecutor(max_workers=workers) as ex:
             for sid, v in ex.map(q5207, miss):
                 if v:
                     gpnl[sid] = v
-        print(f"[gsellers] card 5207 pass {rnd} (retried {len(miss)}): {len(gpnl)}/{len(gsids)}")
+        print(f"[gsellers] card 5207 pass {rnd} (retried {len(miss)}): {len(gpnl)}/{len(gaids)}")
 
     # No-clobber guard: never publish a run whose PNL coverage collapsed vs the file already on
     # disk — a throttled fetch would silently zero out the bucket counts. Carry the previous
     # seller's PNL forward instead and record it in dq.
-    prev = load("google_sellers_data.json", {})
-    prev_pnl = {r["s"]: r for r in (prev.get("rows") or [])
+    prev_pnl = {s: r for s, r in prev_row.items()
                 if r.get("w1p") is not None or r.get("w1s") is not None}
     carried = 0
     if prev_pnl and len(gpnl) < 0.9 * len(prev_pnl):
-        for sid in gsids:
+        for sid in gaids:
             if sid not in gpnl and sid in prev_pnl:
                 r = prev_pnl[sid]
                 gpnl[sid] = {"w1p": r.get("w1p"), "w1s": r.get("w1s"), "w1w": "",
@@ -292,7 +348,7 @@ def main():
               f"{len(prev_pnl)} previously) — carried {carried} sellers' PNL from the previous file")
 
     weeks = sorted({v["w1w"] for v in gpnl.values() if v["w1w"]}, reverse=True)
-    print(f"[gsellers] card 5207 google PNL: {len(gpnl)}/{len(gsids)} sellers "
+    print(f"[gsellers] card 5207 google PNL: {len(gpnl)}/{len(gaids)} google-account sellers "
           f"({carried} carried forward) · w1 weeks seen {weeks[:3]}")
 
     # ---- assemble ----
@@ -312,6 +368,13 @@ def main():
         if ysp is None:
             ysp = fnum_or_none(sr.get("gy"))
         last7 = fnum_or_none(c.get("last_7_days_spend"))
+        _pv = prev_row.get(sid) or {}
+        if last7 is None:               # card 7401 unavailable: only it carries last-7-day spend
+            last7 = _pv.get("last7")
+        if life is None:
+            life = _pv.get("life")
+        if ysp is None:
+            ysp = _pv.get("ysp")
         p = gpnl.get(sid) or {}
         w1p, w2p = p.get("w1p"), p.get("w2p")
         w1s, w2s = p.get("w1s"), p.get("w2s")
@@ -331,8 +394,9 @@ def main():
             "life": None if life is None else round(life, 2),
             "ysp": None if ysp is None else round(ysp, 2),
             "last7": None if last7 is None else round(last7, 2),
+            "gaMade": bool(str(sr.get("ga") or "").strip()),
             "live": bool(life is not None and life > LIVE_MIN),
-            "spending": bool(ysp is not None and ysp > 0),
+            "spending": bool(ysp is not None and ysp > YEST_MIN),
             "k3": bool(last7 is not None and last7 > SPEND_GATE),
             "w1p": None if w1p is None else round(w1p, 1),
             "w2p": None if w2p is None else round(w2p, 1),
@@ -349,15 +413,20 @@ def main():
         "cards": {"pnl": 5207, "googleSpend": 7401, "roles": 7753,
                   "roleTable": "nushop.seller_managers + nushop.users"},
         "thresholds": {"spendGate": SPEND_GATE, "pnlHit": PNL_HIT, "pnlSubjective": PNL_SUBJ,
-                       "healthFloor": HEALTH_FLOOR, "liveMin": LIVE_MIN},
+                       "healthFloor": HEALTH_FLOOR, "liveMin": LIVE_MIN, "yestMin": YEST_MIN},
         "weeks": {"w1": (weeks[0] if weeks else ""), "w2": ""},
         "rows": rows_out,
         "dq": {
-            "base1k5k": len(base), "googleAcctMade": len(gsids),
+            "base1k5k": len(base), "totalAssigned": len(gsids), "googleAssetsCreated": len(gaids),
             "pnlCovered": len(gpnl), "pnlCarriedForward": carried, "spendCovered": len(g7401),
-            "roleCoverage": role_cov,
-            "counts": {k: cnt(k) for k in ("live", "spending", "k3", "health",
+            # measured off the emitted rows, not the fetch step: a quota-failed role query
+            # still yields coverage via the carry-forward above, and dq must say so.
+            "roleCoverage": {k: sum(1 for r in rows_out if r.get(k)) for k in ("gl", "gm", "cl", "ggl")},
+            "counts": {k: cnt(k) for k in ("gaMade", "live", "spending", "k3", "health",
                                            "potential", "objective", "subjective")},
+            "yestSpendTotal": round(sum(r["ysp"] or 0 for r in rows_out)),
+            "spendPerLive": (round(sum(r["ysp"] or 0 for r in rows_out) / cnt("live"))
+                             if cnt("live") else None),
             "card11011": ("unusable as the PNL source: its hit_sellers CTE excludes every "
                           "csv_upload.hit_master_data seller, so overlap with the 1k-5k base is 0; "
                           "and best_source='google' is 0 rows card-wide because best_source tags "
@@ -376,9 +445,11 @@ def main():
     out["weeks"]["w2"] = w2s_seen[0] if w2s_seen else ""
 
     json.dump(out, open(OUT, "w"), separators=(",", ":"))
-    print(f"[out] {OUT} ({os.path.getsize(OUT)} bytes) · {len(rows_out)} google 1k-5k sellers · "
-          + " · ".join(f"{k}={cnt(k)}" for k in ("live", "spending", "k3", "health",
-                                                 "potential", "objective", "subjective")))
+    _yt = sum(r["ysp"] or 0 for r in rows_out)
+    print(f"[out] {OUT} ({os.path.getsize(OUT)} bytes) · {len(rows_out)} assigned 1k-5k sellers · "
+          + " · ".join(f"{k}={cnt(k)}" for k in ("gaMade", "live", "spending", "k3", "health",
+                                                 "potential", "objective", "subjective"))
+          + f" · yesterday spend Rs{_yt:,.0f} · spend/live Rs{(_yt / cnt('live')) if cnt('live') else 0:,.0f}")
 
     if "--push" in sys.argv:
         subprocess.run(["git", "-C", REPO, "add", "google_sellers_data.json"], check=True)
