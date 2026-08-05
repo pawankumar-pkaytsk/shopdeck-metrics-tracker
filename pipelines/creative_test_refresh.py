@@ -6,9 +6,12 @@ post go-live). Grain: one row per level x entity x seller x day.
 
 TWO ways to group, both emitted (this is the standard experiment pair):
   * ITT (intent-to-treat) = the card's `campaign_type`. Its SQL derives it from
-    MOD(ABS(FARM_FINGERPRINT(seller_id)),2) — which looks arbitrary, but it agrees with
-    what sellers ACTUALLY ran 89% of the time (25/28), so it reproduces the real
-    assignment rule. Grouping by assignment is the unbiased comparison.
+    MOD(ABS(FARM_FINGERPRINT(seller_id)),2). That is CONFIRMED to be the real assignment
+    rule, not a guess: card 11736 was reworked on 2026-08-05 to carry a hand-recorded seed
+    of locked campaign_type values, and the hash reproduces every one of them (see the
+    `assignment` block, recomputed each run). Grouping by assignment is the unbiased
+    comparison. NOTE 11736 also stopped dropping sellers once they go live, so it is now
+    the cohort funnel too — qualified vs live is published in `assignment`.
   * PER-PROTOCOL = what was actually executed, derived from the ADSET NAME. Biased by
     self-selection, but it is the only way to split arm-vs-arm inside a B seller.
   The 11% gap between them is non-compliance (e.g. sellers assigned to catalogue that
@@ -28,10 +31,11 @@ day late, so 'partial-intraday' rows would understate spend).
 
 Run: cd ~/shopdeck-metrics-site && python3 pipelines/creative_test_refresh.py
 """
-import json, os, statistics, urllib.request, datetime
+import json, os, re, statistics, urllib.request, datetime
 from collections import defaultdict
 
 CARD = 12207
+ASSIGN_CARD = 11736   # A2H cohort + the locked campaign_type seed (assignment authority)
 REPO = os.path.expanduser(os.environ.get("REPO_DIR", "~/shopdeck-metrics-site"))
 OUT = os.path.join(REPO, "creative_test_data.json")
 CRED_CACHE = os.path.expanduser("~/metabase-arr-refresh/.mbcreds")
@@ -127,6 +131,48 @@ def main():
 
     rows = req(f"{url}/api/card/{CARD}/query/json", "POST", {}, H)
     final = [r for r in rows if r.get("day_status") == "final"]
+
+    # ---- verify the A/B assignment against card 11736's frozen seed ----
+    # 11736 was reworked on 2026-08-05: it now carries a hand-recorded CSV seed of locked
+    # campaign_type values (STRUCT(...) literals in its SQL) and only falls back to the
+    # FARM_FINGERPRINT hash for brand-new sellers. It also stopped dropping sellers once they go
+    # live, so it is now the cohort funnel as well as the assignment authority.
+    # Card 12207 still derives campaign_type from the hash, so this recomputes the agreement every
+    # run instead of trusting a one-off check: if the seed and the hash ever diverge, the ITT arm
+    # is wrong and this number falls below 100.
+    assignment = {"card": ASSIGN_CARD, "checked": 0, "agree": 0, "agreePct": None,
+                  "lockedSeed": 0, "cohortQualified": None, "cohortLive": None, "note": ""}
+    try:
+        a_sql = req(f"{url}/api/card/{ASSIGN_CARD}", "GET", None, H)["dataset_query"]
+        a_sql = (a_sql["stages"][0]["native"] if "stages" in a_sql else a_sql["native"]["query"])
+        seed = dict(re.findall(r"STRUCT\('([0-9a-f]{24})'(?:\s+AS\s+seller_id)?,\s*'([^']+)'", a_sql))
+        a_rows = req(f"{url}/api/card/{ASSIGN_CARD}/query/json", "POST", {}, H)
+        assignment["lockedSeed"] = len(seed)
+        assignment["cohortQualified"] = len({str(r.get("seller_id")) for r in a_rows if r.get("seller_id")})
+        assignment["cohortLive"] = len({str(r.get("seller_id")) for r in a_rows
+                                        if r.get("seller_id") and r.get("go_live_date")})
+        hash_of = {}
+        for r in rows:
+            sid = str(r.get("seller_id") or "")
+            if sid and sid not in hash_of:
+                hash_of[sid] = str(r.get("campaign_type") or "")
+        chk = [(s, t) for s, t in seed.items() if s in hash_of]
+        assignment["checked"] = len(chk)
+        assignment["agree"] = sum(1 for s, t in chk if t == hash_of[s])
+        if chk:
+            assignment["agreePct"] = round(assignment["agree"] / len(chk) * 100)
+        assignment["note"] = (
+            "card %d holds %d hand-recorded locked assignments; the hash card 12207 uses "
+            "reproduces %d of the %d that reached go-live (%s%%). At 100%% the seed and the hash "
+            "are the same rule, so the ITT arm is the real assignment and the assigned-vs-executed "
+            "gap below is seller non-compliance, not assignment error."
+            % (ASSIGN_CARD, len(seed), assignment["agree"], len(chk), assignment["agreePct"]))
+        print(f"[creative-test] assignment check vs card {ASSIGN_CARD}: "
+              f"{assignment['agree']}/{assignment['checked']} = {assignment['agreePct']}% · "
+              f"cohort {assignment['cohortLive']} live of {assignment['cohortQualified']} qualified")
+    except Exception as ex:
+        assignment["note"] = f"card {ASSIGN_CARD} unavailable ({ex}) — assignment not re-verified this run"
+        print(f"[creative-test] assignment check skipped: {ex}")
 
     # ---- derive per-seller setup from the arms their adsets actually run ----
     seller_arms = defaultdict(set)
@@ -372,6 +418,7 @@ def main():
         "card": CARD,
         "ab": ab,
         "compliance": compliance,
+        "assignment": assignment,
         "thresholds": SGMV_THRESHOLDS,
         "overall": overall_pub,
         "arms": arms_pub,
