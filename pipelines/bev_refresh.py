@@ -1780,9 +1780,22 @@ def main():
     try:
         _seg_map = {'HIT1': 'HIT1', 'HIT2': 'HIT2', 'REVENUE': 'REVENUE', 'Revenue': 'REVENUE'}
         _crows = req(f"{url}/api/card/12159/query/json", 'POST', {}, H)
+        # Card 12159's HIT1 leg is `good_seller IS NULL AND (team='HITS' OR hit2=1)`, so EVERY HIT2
+        # seller is ALSO emitted as HIT1 — HIT1 read 278 instead of 233, with all 45 HIT2 sellers
+        # double-counted. The card's REVENUE leg does exclude hit sellers (`NOT IN hit_sids`), so
+        # mutual exclusivity is plainly the intent and the HIT1 leg just misses it; a churn cohort
+        # must not double-count (see metrics-tracker-data-model). Drop the duplicate HIT1 rows here
+        # so this view is right regardless of the card. Idempotent — a no-op once the card's own SQL
+        # is fixed at source, which is the durable fix.
+        _h2_sids = {str(_r.get('seller_id') or '') for _r in _crows
+                    if str(_r.get('hit_team') or '').strip() == 'HIT2'}
+        _dupes = 0
         for _r in _crows:
             seg = _seg_map.get(str(_r.get('hit_team') or '').strip())
             if not seg:
+                continue
+            if seg == 'HIT1' and str(_r.get('seller_id') or '') in _h2_sids:
+                _dupes += 1        # HIT2 graduate — counted in its HIT2 cohort month only
                 continue
             hm = str(_r.get('handover_date') or '')[:7]   # HIT (handover) month YYYY-MM
             if not hm:
@@ -1817,10 +1830,11 @@ def main():
                 else:
                     break
             churn_cmp['maxObs'][_seg] = min(_now_idx - _oldest_run, churn_cmp['maxAge'] + 1)
-        print(f"[bev2] churn cohort (card 12142): "
+        print(f"[bev2] churn cohort (card 12159): "
               f"HIT1={len(churn_cmp['rows']['HIT1'])}/{churn_cmp['totals']['HIT1']} "
               f"HIT2={len(churn_cmp['rows']['HIT2'])}/{churn_cmp['totals']['HIT2']} "
-              f"REVENUE={len(churn_cmp['rows']['REVENUE'])}/{churn_cmp['totals']['REVENUE']} churned/base")
+              f"REVENUE={len(churn_cmp['rows']['REVENUE'])}/{churn_cmp['totals']['REVENUE']} churned/base"
+              f" · dropped {_dupes} HIT2-graduate rows double-counted into HIT1 by the card")
     except Exception as _e:
         print(f"[bev2] card 12159 churn cohort failed: {_e}")
 
