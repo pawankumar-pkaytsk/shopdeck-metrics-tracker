@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Build google_sellers_data.json — Leadership -> Bird's Eye View -> Google -> Google Seller Book.
 
-Population: EVERY assigned 1k-5k seller (ts_data.json hitsMap, good=0). One row per seller.
+Population: the 1k-5k book from the ops 'Daily Plan' sheet (column G Status == '5K_HIT'), which
+replaced ts_data.json hitsMap on 2026-08-06 — hit_master_data's `team` is stale in both directions,
+so hitsMap both kept sellers who had left the book and dropped sellers still being serviced. See
+the DAILY_PLAN_SHEET block below. Falls back to hitsMap(good=0) if the sheet is unreachable.
+HIT1 and HIT2 are **mutually exclusive here** (HIT1 = book minus HIT2), unlike the Weekly Metrics /
+cohort views where they overlap; HIT1+HIT2 is still the union so the combined figure agrees.
+Sellers in GOOGLE_HANDOVER_DONE are dropped entirely. One row per seller.
 Having a google ad account is a flag on the row, not an entry condition, because "total assigned"
 is one of the roll-up columns and so has to be the denominator.
 
@@ -56,7 +62,8 @@ recorded in dq.card11011 and surfaced in the view's footnote.
 
 Run: cd ~/shopdeck-metrics-site && python3 pipelines/google_sellers_refresh.py
 """
-import json, os, re, sys, datetime, urllib.request, urllib.error, subprocess
+import glob
+import json, os, re, sys, datetime, urllib.parse, urllib.request, urllib.error, subprocess
 from concurrent.futures import ThreadPoolExecutor
 
 REPO = os.path.expanduser(os.environ.get("REPO_DIR", "~/shopdeck-metrics-site"))
@@ -70,6 +77,58 @@ PNL_SUBJ = 3           # subjective threshold on w-2
 HEALTH_FLOOR = -20     # bucket-health floor
 LIVE_MIN = 10          # lifetime google spend > 10 => "live"
 YEST_MIN = 1           # yesterday google spend > 1 => counted in "Yesterday spending"
+
+# ---- the 1k-5k book: ops' own 'Daily Plan' sheet, column G "Status" == '5K_HIT' ----
+# hit_master_data's `team` column is stale in BOTH directions, so hitsMap is the wrong roster:
+#   * it KEEPS sellers who have left the book (Churned / Revenue / Unassigned / handover not done)
+#   * it DROPS sellers whose `team` was cleared but who are still being serviced
+#     (e.g. Blashyslashy, Life Fashion — team=NULL, hit2=NULL, handover complete)
+# The Daily Plan sheet is what the growth team actually works off, so it is the source of truth
+# for "is this seller in the 1k-5k book today". 229 sellers vs hitsMap's 240 on 2026-08-06.
+DAILY_PLAN_SHEET = "1QCdVIkKa_4yMb1NZHSkIt50x4qoKaFlw2WXpQZnL6KM"
+DAILY_PLAN_RANGE = "'Daily Plan'!A:G"    # A..G is all we need: E=Seller Id(4), G=Status(6)
+DP_SELLER_COL, DP_STATUS_COL = 4, 6
+BOOK_STATUS = "5K_HIT"
+MIN_BOOK = 50          # sanity floor: below this the sheet read is untrustworthy -> keep hitsMap
+
+# ---- sellers whose GOOGLE management has been handed to the central Google team ----
+# They stay on the 1k-5k book for Meta but must not appear in the Google Seller Book at all.
+# FLAGGED: there is no field for this anywhere we can reach — not card 10453, not the handover
+# sheet (A:J), not the Daily Plan, not seller_managers.google_growth_lead (only 6 of these 10
+# have one, and 29 sellers who are NOT handed over do). Supplied by the growth team on
+# 2026-08-06 and hardcoded here, same pattern as bev_refresh's COHORT_EXCLUDE.
+# TODO: replace with a real column once ops expose one — this list WILL go stale.
+GOOGLE_HANDOVER_DONE = {
+    "69c4eeaa317e68f10e2ab99e",  # Devikalooms
+    "69733854317e68f10eb20117",  # Laenzy
+    "699c3657524a3a0bdfe109eb",  # Anu kumar Mandal / magpulse
+    "69c0f143f9cf517be2238375",  # M R Engineering
+    "693945e3dc96074448b6a78f",  # gorya
+    "68aff593859590b2aa413521",  # Nature Nook Kids
+    "699f141fe3b403e118972401",  # The Worship Wear
+    "69c679a70a1e1a55aeed925d",  # Milano Nest
+    "69c53e58317e68f10e44543f",  # Heerkamal enterprise
+    "69d4d03f16ccce91990833c5",  # Lakhani Dhruv
+}
+
+
+def read_sheet_sa(sid, rng):
+    """Read a Google Sheet range via the service account (GOOGLE_SA_KEY env or local key file)."""
+    from google.oauth2 import service_account
+    import google.auth.transport.requests as gtr
+    SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    if os.environ.get("GOOGLE_SA_KEY"):
+        cred = service_account.Credentials.from_service_account_info(
+            json.loads(os.environ["GOOGLE_SA_KEY"]), scopes=SCOPES)
+    else:
+        exact = os.path.expanduser("~/Downloads/metrics-tracker-automation-53ad2cdd4b65.json")
+        path = exact if os.path.exists(exact) else (
+            glob.glob(os.path.expanduser("~/Downloads/metrics-tracker-automation-*.json")) or [None])[0]
+        cred = service_account.Credentials.from_service_account_file(path, scopes=SCOPES)
+    cred.refresh(gtr.Request())
+    u = (f"https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/{urllib.parse.quote(rng)}"
+         "?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING")
+    return json.loads(urllib.request.urlopen(u, timeout=180).read()).get("values", [])
 
 
 def creds():
@@ -175,12 +234,39 @@ def main():
     sc = scaling.get("sellers", {})
     base = {sid: m for sid, m in hits.items() if not m.get("good")}
 
-    # HIT1 = the assigned book (hitsMap keeps each seller's LATEST hit_master_data row and only
-    # where team='HITS'). HIT2 = hit2=1 excluding good sellers, taken straight from card 10453.
-    # They are NOT disjoint — a seller can be both — so HIT1+HIT2 is the union, matching how the
-    # Weekly Metrics and cohort views define these buckets.
-    # This matters: converting to HIT2 flips team off HITS, so 38 of the 42 HIT2 sellers have a
-    # NULL latest team and fall out of hitsMap entirely. Reading only the book hides them.
+    # The 1k-5k book comes from the Daily Plan sheet (Status == '5K_HIT'), not hitsMap — see the
+    # DAILY_PLAN_SHEET comment. Degrade to hitsMap if the sheet is unreachable (no GOOGLE_SA_KEY
+    # locally, Sheets API blip) or returns an implausibly small book, so a failed read can never
+    # empty the table.
+    book, book_src = set(base), "hitsMap(good=0) [Daily Plan unavailable]"
+    try:
+        _dp = read_sheet_sa(DAILY_PLAN_SHEET, DAILY_PLAN_RANGE)
+        _k5 = set()
+        for _r in _dp[2:]:                      # rows 0-1 are the two header rows
+            if len(_r) > DP_STATUS_COL and str(_r[DP_STATUS_COL]).strip() == BOOK_STATUS:
+                _s = str(_r[DP_SELLER_COL]).strip() if len(_r) > DP_SELLER_COL else ""
+                if _s:
+                    _k5.add(_s)
+        if len(_k5) >= MIN_BOOK:
+            book, book_src = _k5, f"Daily Plan Status=={BOOK_STATUS}"
+            print(f"[gsellers] book from Daily Plan: {len(_k5)} sellers "
+                  f"(hitsMap had {len(base)}; +{len(_k5 - set(base))} / -{len(set(base) - _k5)})")
+        else:
+            print(f"[gsellers] Daily Plan returned only {len(_k5)} '{BOOK_STATUS}' sellers "
+                  f"(< {MIN_BOOK}) — keeping hitsMap book of {len(base)}")
+    except Exception as _ex:
+        print(f"[gsellers] Daily Plan sheet unavailable ({str(_ex)[:80]}) — keeping hitsMap "
+              f"book of {len(base)}")
+
+    # HIT1 = the 1k-5k book (above) MINUS the HIT2 graduates. HIT2 = hit2=1 excluding good sellers,
+    # taken straight from card 10453.
+    # NOTE this table deliberately makes HIT1 and HIT2 **mutually exclusive**, unlike the Weekly
+    # Metrics / cohort views where they overlap by design (card-11815 `_G15UNI` predicates). The
+    # growth team reads the HIT1 toggle as "still in the 1k-5k book", so a seller who has converted
+    # to HIT2 must not be counted there. HIT1+HIT2 is still the full union, so the combined figure
+    # matches the other views. Two conventions coexist on purpose — see metrics-tracker-data-model.
+    # Converting to HIT2 flips team off HITS, so most HIT2 sellers are absent from hitsMap; taking
+    # HIT2 straight from 10453 is what keeps them visible.
     _TRUE = ("1", "1.0", "True", "true")
     h2ids, name10453 = set(), {}
     try:
@@ -193,13 +279,18 @@ def main():
             if str(r.get("hit2")).strip() in _TRUE and str(r.get("good_seller")).strip() not in _TRUE:
                 h2ids.add(_s)
         print(f"[gsellers] card 10453: HIT2 population {len(h2ids)} "
-              f"({len(h2ids & set(base))} of them also inside the assigned book)")
+              f"({len(h2ids & book)} of them also inside the book)")
     except Exception as ex:
         print(f"[gsellers] card 10453 failed ({ex}) — HIT2 toggle will be empty")
 
-    gsids = sorted(set(base) | h2ids)
+    # HIT1 = book minus HIT2 graduates. Google-handed-over sellers leave the Google book entirely.
+    h1ids = (book - h2ids) - GOOGLE_HANDOVER_DONE
+    h2ids = h2ids - GOOGLE_HANDOVER_DONE
+    gsids = sorted(h1ids | h2ids)
     gaids = sorted(sid for sid in gsids if str(sc.get(sid, {}).get("ga") or "").strip())
-    print(f"[gsellers] rows {len(gsids)} = HIT1 {len(base)} + HIT2 {len(h2ids)} - overlap {len(set(base) & h2ids)}")
+    print(f"[gsellers] book={len(book)} ({book_src}) · HIT1 {len(h1ids)} + HIT2 {len(h2ids)} "
+          f"= {len(gsids)} rows · dropped {len(GOOGLE_HANDOVER_DONE & (book | h2ids))} "
+          f"google-handed-over")
     if not gsids:
         print("[gsellers] no sellers — aborting without writing")
         return
@@ -408,7 +499,7 @@ def main():
         rows_out.append({
             "s": sid,
             "n": str(meta.get("n") or "").strip() or name10453.get(sid, ""),
-            "h1": sid in base,          # on the assigned 1k-5k book
+            "h1": sid in h1ids,         # in the 1k-5k book and NOT a HIT2 graduate
             "h2": sid in h2ids,         # hit2 = 1 (overlaps h1 by design)
             "ga": str(sr.get("ga") or ""),
             "gl": roles[sid].get("gl", ""), "gm": roles[sid].get("gm", ""),
@@ -442,7 +533,8 @@ def main():
         "weeks": {"w1": (weeks[0] if weeks else ""), "w2": ""},
         "rows": rows_out,
         "dq": {
-            "base1k5k": len(base), "totalAssigned": len(base), "googleAssetsCreated": len(gaids),
+            "base1k5k": len(book), "bookSource": book_src, "totalAssigned": len(h1ids),
+            "googleHandedOver": sorted(GOOGLE_HANDOVER_DONE), "googleAssetsCreated": len(gaids),
             # per-bucket headline counts. HIT2 rows carry no GL/CL mapping and no weekly google
             # PNL, so the view shows only these four for HIT2 / HIT1+HIT2.
             "buckets": {
