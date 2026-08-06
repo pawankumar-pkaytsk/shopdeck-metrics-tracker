@@ -240,7 +240,15 @@ def main():
     # empty the table.
     book, book_src = set(base), "hitsMap(good=0) [Daily Plan unavailable]"
     try:
-        _dp = read_sheet_sa(DAILY_PLAN_SHEET, DAILY_PLAN_RANGE)
+        # Prefer a local daily_plan.json if one is sitting in the repo (build.mjs writes it from the
+        # same sheet, and it is gitignored). Lets this pipeline run on a machine without the Google
+        # SA key; CI has no such file, so CI always reads the sheet live.
+        _local = os.path.join(REPO, "daily_plan.json")
+        if os.path.exists(_local):
+            _dp = (json.load(open(_local)) or {}).get("values") or []
+            print(f"[gsellers] Daily Plan from local daily_plan.json ({len(_dp)} rows)")
+        else:
+            _dp = read_sheet_sa(DAILY_PLAN_SHEET, DAILY_PLAN_RANGE)
         _k5 = set()
         for _r in _dp[2:]:                      # rows 0-1 are the two header rows
             if len(_r) > DP_STATUS_COL and str(_r[DP_STATUS_COL]).strip() == BOOK_STATUS:
