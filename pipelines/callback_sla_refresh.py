@@ -20,36 +20,39 @@ def creds():
     return e["METABASE_URL"].rstrip("/"), e["METABASE_USER_EMAIL"], e["METABASE_PASSWORD"]
 
 
-def req(url, method="GET", body=None, H=None):
-    import time as _t
-    data = json.dumps(body).encode() if body is not None else None
-    r = urllib.request.Request(url, data=data, method=method, headers=H or {})
-    last = None
-    for attempt in range(4):
-        try:
-            with urllib.request.urlopen(r, timeout=180) as resp:
-                return json.loads(resp.read().decode())
-        except Exception as e:
-            last = e
-            _t.sleep(3 * (attempt + 1))
-    raise last
-
-
 def main():
     url, email, pw = creds()
-    _mbkey = os.environ.get('METABASE_API_KEY')
-    if not _mbkey:
+    key = os.environ.get('METABASE_API_KEY')
+    if not key:
         try:
-            _mbkey = json.load(open(os.path.expanduser('~/metabase-arr-refresh/.mbcreds'))).get('METABASE_API_KEY')
+            key = json.load(open(CRED_CACHE)).get('METABASE_API_KEY')
         except Exception:
-            _mbkey = None
-    if _mbkey:
-        AUTH = {'x-api-key': _mbkey}
-    else:
-        tok = req(url + "/api/session", 'POST', {"username": email, "password": pw}, {'Content-Type': 'application/json'})['id']
-        AUTH = {'X-Metabase-Session': tok}
-    H = {'Content-Type': 'application/json', **AUTH}
-    rows = req(f"{url}/api/card/{CARD}/query/json", "POST", {}, H)
+            key = None
+
+    _tok = [None]
+
+    def fetch(cid):
+        """api-key first; on failure (routinely a 400 from a spent BigQuery quota) fall back to
+        a session token, which returns Metabase's cached result instead of forcing a fresh scan."""
+        if key:
+            try:
+                r = urllib.request.Request(f"{url}/api/card/{cid}/query/json", data=b"{}",
+                                           headers={"x-api-key": key, "Content-Type": "application/json"},
+                                           method="POST")
+                return json.loads(urllib.request.urlopen(r, timeout=180).read())
+            except Exception as e:
+                print(f"[callback-sla] card {cid} api-key path failed ({str(e)[:60]}) — trying session cache")
+        if _tok[0] is None:
+            r = urllib.request.Request(url + "/api/session",
+                                       data=json.dumps({"username": email, "password": pw}).encode(),
+                                       headers={"Content-Type": "application/json"}, method="POST")
+            _tok[0] = json.loads(urllib.request.urlopen(r, timeout=180).read())["id"]
+        r = urllib.request.Request(f"{url}/api/card/{cid}/query/json", data=b"{}",
+                                   headers={"X-Metabase-Session": _tok[0], "Content-Type": "application/json"},
+                                   method="POST")
+        return json.loads(urllib.request.urlopen(r, timeout=180).read())
+
+    rows = fetch(CARD)
     out_rows = []
     for r in rows:
         out_rows.append({
@@ -69,7 +72,7 @@ def main():
     def _n(v):
         try: return round(float(v), 2)
         except (TypeError, ValueError): return None
-    grows = req(f"{url}/api/card/{GC_CARD}/query/json", "POST", {}, H)
+    grows = fetch(GC_CARD)
     gc_rows = []
     for r in grows:
         gc_rows.append({
