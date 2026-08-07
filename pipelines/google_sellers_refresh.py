@@ -90,6 +90,13 @@ DAILY_PLAN_RANGE = "'Daily Plan'!A:G"    # A..G is all we need: E=Seller Id(4), 
 DP_SELLER_COL, DP_STATUS_COL = 4, 6
 BOOK_STATUS = "5K_HIT"
 MIN_BOOK = 50          # sanity floor: below this the sheet read is untrustworthy -> keep hitsMap
+LOCAL_MAX_AGE_H = 18   # a local sheet dump older than this is ignored in favour of a live read
+
+# The handover sheet decides whether a seller has actually been handed to the 1k-5k team.
+# Historical: one row per HIT week, so the LATEST row for a seller wins.
+HANDOVER_SHEET = "1ZLOcj648aYvVaEGHX_QHB1Qx3OMUT3K_eeW-SBUbCso"
+HANDOVER_RANGE = "'handover'!A:J"        # C=Seller ID(2), J=Handover Status(9)
+HO_SELLER_COL, HO_STATUS_COL = 2, 9
 
 # ---- sellers whose GOOGLE management has been handed to the central Google team ----
 # They stay on the 1k-5k book for Meta but must not appear in the Google Seller Book at all.
@@ -234,37 +241,95 @@ def main():
     sc = scaling.get("sellers", {})
     base = {sid: m for sid, m in hits.items() if not m.get("good")}
 
-    # The 1k-5k book comes from the Daily Plan sheet (Status == '5K_HIT'), not hitsMap — see the
-    # DAILY_PLAN_SHEET comment. Degrade to hitsMap if the sheet is unreachable (no GOOGLE_SA_KEY
-    # locally, Sheets API blip) or returns an implausibly small book, so a failed read can never
-    # empty the table.
-    book, book_src = set(base), "hitsMap(good=0) [Daily Plan unavailable]"
+    # ---- the 1k-5k book -------------------------------------------------------------------
+    #   book = (hitsMap(good=0)  UNION  Daily Plan Status=='5K_HIT')  AND  handover complete
+    #
+    # Neither roster alone is right, and the gate is the handover sheet, not the status:
+    #   * hitsMap misses sellers whose hit_master_data.team was cleared while they are still
+    #     being serviced (Blashyslashy, Life Fashion) -> the Daily Plan union adds them back.
+    #   * Daily Plan Status alone is too strict: a seller who has moved to Churned / Revenue /
+    #     Unassigned is no longer '5K_HIT' but is still part of the Google book (PURI HANDICRAFT,
+    #     Aabhira, Rangeen, Tiny vibes, Trishna Housewares, Zenius India) -> so the union, not
+    #     the intersection, decides membership.
+    #   * handover sheet column J "Handover Status" is the real entry condition: sellers whose
+    #     handover was never completed (False) are in hit_master_data with team='HITS' but are
+    #     NOT yet the 1k-5k team's responsibility, and must be excluded.
+    # Every source degrades independently: a failed read narrows behaviour toward hitsMap rather
+    # than emptying or silently un-gating the table.
+    def _sheet_rows(local_name, sid, rng, hdr):
+        """Sheet values via a local build.mjs dump if present (works without the SA key), else live.
+
+        The local file is only trusted while it is FRESH. Ops edit these sheets during the day —
+        K M ENTERPRISES flipped Handover Status False->True inside 12 hours — so a stale dump would
+        silently pin the book to yesterday's roster. Beyond LOCAL_MAX_AGE_H we ignore it and read
+        the sheet live (CI never has the file at all, so CI is always live).
+        """
+        _p = os.path.join(REPO, local_name)
+        if os.path.exists(_p):
+            _j = json.load(open(_p)) or {}
+            _age = None
+            _ts = str(_j.get("generatedAt") or "")
+            try:
+                _age = (datetime.datetime.utcnow() - datetime.datetime.strptime(
+                    _ts[:19], "%Y-%m-%dT%H:%M:%S")).total_seconds() / 3600.0
+            except ValueError:
+                pass
+            if _age is None or _age <= LOCAL_MAX_AGE_H:
+                _v = _j.get("values") or []
+                print(f"[gsellers] {local_name} from local file ({len(_v)} rows, "
+                      f"{'age %.1fh' % _age if _age is not None else 'age unknown'})")
+                return _v[hdr:]
+            # Stale: prefer a live read, but keep the stale copy as a last resort — it is still a
+            # far better roster than hitsMap, which is what we would otherwise degrade to.
+            try:
+                _live = read_sheet_sa(sid, rng)
+                print(f"[gsellers] local {local_name} is {_age:.1f}h old (> {LOCAL_MAX_AGE_H}h) "
+                      f"— read the sheet live instead")
+                return _live[hdr:]
+            except Exception as _e2:
+                _v = _j.get("values") or []
+                print(f"[gsellers] WARNING live read failed ({str(_e2)[:60]}); falling back to the "
+                      f"{_age:.1f}h-old local {local_name} ({len(_v)} rows) — roster may be stale")
+                return _v[hdr:]
+        return read_sheet_sa(sid, rng)[hdr:]
+
+    book, book_src = set(base), "hitsMap(good=0)"
     try:
-        # Prefer a local daily_plan.json if one is sitting in the repo (build.mjs writes it from the
-        # same sheet, and it is gitignored). Lets this pipeline run on a machine without the Google
-        # SA key; CI has no such file, so CI always reads the sheet live.
-        _local = os.path.join(REPO, "daily_plan.json")
-        if os.path.exists(_local):
-            _dp = (json.load(open(_local)) or {}).get("values") or []
-            print(f"[gsellers] Daily Plan from local daily_plan.json ({len(_dp)} rows)")
-        else:
-            _dp = read_sheet_sa(DAILY_PLAN_SHEET, DAILY_PLAN_RANGE)
-        _k5 = set()
-        for _r in _dp[2:]:                      # rows 0-1 are the two header rows
-            if len(_r) > DP_STATUS_COL and str(_r[DP_STATUS_COL]).strip() == BOOK_STATUS:
-                _s = str(_r[DP_SELLER_COL]).strip() if len(_r) > DP_SELLER_COL else ""
-                if _s:
-                    _k5.add(_s)
+        _k5 = {str(_r[DP_SELLER_COL]).strip() for _r in
+               _sheet_rows("daily_plan.json", DAILY_PLAN_SHEET, DAILY_PLAN_RANGE, 2)
+               if len(_r) > DP_STATUS_COL and str(_r[DP_STATUS_COL]).strip() == BOOK_STATUS
+               and len(_r) > DP_SELLER_COL and str(_r[DP_SELLER_COL]).strip()}
         if len(_k5) >= MIN_BOOK:
-            book, book_src = _k5, f"Daily Plan Status=={BOOK_STATUS}"
-            print(f"[gsellers] book from Daily Plan: {len(_k5)} sellers "
-                  f"(hitsMap had {len(base)}; +{len(_k5 - set(base))} / -{len(set(base) - _k5)})")
+            book = set(base) | _k5
+            book_src = f"hitsMap ∪ DailyPlan[{BOOK_STATUS}]"
+            print(f"[gsellers] Daily Plan '{BOOK_STATUS}': {len(_k5)} — union with hitsMap "
+                  f"({len(base)}) = {len(book)} (+{len(_k5 - set(base))} hitsMap missed)")
         else:
             print(f"[gsellers] Daily Plan returned only {len(_k5)} '{BOOK_STATUS}' sellers "
                   f"(< {MIN_BOOK}) — keeping hitsMap book of {len(base)}")
     except Exception as _ex:
-        print(f"[gsellers] Daily Plan sheet unavailable ({str(_ex)[:80]}) — keeping hitsMap "
+        print(f"[gsellers] Daily Plan unavailable ({str(_ex)[:80]}) — keeping hitsMap "
               f"book of {len(base)}")
+
+    # handover gate. The sheet is historical (one row per HIT week), so the LATEST row wins.
+    try:
+        _hs = {}
+        for _r in _sheet_rows("handover.json", HANDOVER_SHEET, HANDOVER_RANGE, 1):
+            _s = str(_r[HO_SELLER_COL]).strip() if len(_r) > HO_SELLER_COL else ""
+            if _s:
+                _hs[_s] = str(_r[HO_STATUS_COL]).strip() if len(_r) > HO_STATUS_COL else ""
+        _not_done = {s for s in book if _hs.get(s) == "False"}
+        if len(_hs) >= MIN_BOOK:
+            book -= _not_done
+            book_src += " ∧ handoverDone"
+            print(f"[gsellers] handover gate: dropped {len(_not_done)} seller(s) with "
+                  f"Handover Status=False -> book {len(book)}")
+        else:
+            print(f"[gsellers] handover sheet returned only {len(_hs)} rows (< {MIN_BOOK}) — "
+                  f"gate NOT applied, book stays {len(book)}")
+    except Exception as _ex:
+        print(f"[gsellers] handover sheet unavailable ({str(_ex)[:80]}) — gate NOT applied, "
+              f"book stays {len(book)}")
 
     # HIT1 = the 1k-5k book (above) MINUS the HIT2 graduates. HIT2 = hit2=1 excluding good sellers,
     # taken straight from card 10453.
