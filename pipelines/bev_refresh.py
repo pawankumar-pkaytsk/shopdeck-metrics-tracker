@@ -317,6 +317,34 @@ def main():
     print(f"[bev] HIT2 total {len(hit2_detail)} distinct sellers"
           + (f" ({_h2unknown} with no hit2_month/hit2_year -> 'Unknown')" if _h2unknown else ""))
 
+    # ---- HIT2 reconciliation diagnostics -------------------------------------------------------
+    # The growth team read "Total HIT2 = 49" on 2026-08-10 while every count in the tracker said
+    # 45-46. card 10453 is already in memory here, so print each candidate definition for free —
+    # whichever one lands on the team's number identifies the definition we should be using.
+    # Cheap enough to keep permanently: it is a handful of set builds over rows we already have.
+    def _h2n(v):
+        return v is None or str(v).strip() in ('', 'None', 'null')
+    _h2all = {str(r.get('seller_id') or '').strip() for r in hitrows
+              if str(r.get('hit2')).strip() in ('1', '1.0', 'True', 'true')
+              and str(r.get('seller_id') or '').strip()}
+    _h2var = {
+        'hit2=1 (distinct)': _h2all,
+        '+ has hit2_month & _year': {str(r.get('seller_id') or '').strip() for r in hitrows
+                                     if str(r.get('hit2')).strip() in ('1', '1.0', 'True', 'true')
+                                     and not _h2n(r.get('hit2_month')) and not _h2n(r.get('hit2_year'))},
+        '+ has hit2_year_week': {str(r.get('seller_id') or '').strip() for r in hitrows
+                                 if str(r.get('hit2')).strip() in ('1', '1.0', 'True', 'true')
+                                 and not _h2n(r.get('hit2_year_week'))},
+        '+ good_seller IS NULL': {str(r.get('seller_id') or '').strip() for r in hitrows
+                                  if str(r.get('hit2')).strip() in ('1', '1.0', 'True', 'true')
+                                  and _h2n(r.get('good_seller'))},
+        '+ team=HITS': {str(r.get('seller_id') or '').strip() for r in hitrows
+                        if str(r.get('hit2')).strip() in ('1', '1.0', 'True', 'true')
+                        and str(r.get('team') or '').strip().upper() == 'HITS'},
+    }
+    print('[bev] HIT2 variant counts: '
+          + ' · '.join(f'{k}={len(v)}' for k, v in _h2var.items()))
+
     # ---- ARR cohort (card 11020): hit_year_month x M0..M6, with TARGET row ----
     cohort_raw = req(f"{url}/api/card/{COHORT_CARD}/query/json", 'POST', {}, H)
     mcols = ['M0', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6']
