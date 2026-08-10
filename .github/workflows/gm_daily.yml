@@ -1,13 +1,25 @@
-name: GM Daily Output Compliance (8 AM)
+name: GM Daily Output Compliance (10 AM IST)
 
 # Dedicated, isolated morning refresh for the "GM Daily Output Compliance" report
 # (Central Reports -> Core Team). Runs golive (card 7682) then GM compliance (card 2580 +
 # Validation sheet), so it stays fresh even if the big nightly refresh fails on another step.
+#
+# SCHEDULING — do not move this back into the nightly's window.
+# Every workflow here shares `concurrency: data-write`, and GitHub keeps only ONE *pending* run
+# per group: a newer arrival cancels the older pending one. This job used to run at 02:50 UTC,
+# i.e. 20 min AFTER the nightly starts, so it always queued behind a ~45-minute run and was then
+# superseded by the next ts_refresh / gc_refresh. It was cancelled 6 days out of 6 (2026-08-05 ->
+# 08-10) and had effectively never executed. No data was lost — golive_refresh and
+# gm_compliance_refresh also run inside refresh.yml — but this job's own mid-morning refresh
+# never happened.
+# 04:30 UTC sits after the nightly has finished on its usual timing (it is cron'd for 02:30 but
+# GitHub delays it to ~04:10-05:50, then runs ~45 min) and clears the ts_refresh (every 3h on the
+# hour) and gc_refresh (:30, every 2h from 03:30) slots.
 
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: '50 2 * * *'   # 08:20 IST (after the main nightly refresh starts)
+    - cron: '30 4 * * *'   # 10:00 IST — after the nightly finishes, not 20 min after it starts
 
 permissions:
   contents: write
