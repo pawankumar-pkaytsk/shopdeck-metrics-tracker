@@ -135,7 +135,10 @@ def read_sheet_sa(sid, rng):
     cred.refresh(gtr.Request())
     u = (f"https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/{urllib.parse.quote(rng)}"
          "?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING")
-    return json.loads(urllib.request.urlopen(u, timeout=180).read()).get("values", [])
+    # The Bearer header is not optional — without it Sheets answers 403 Forbidden, which the
+    # callers swallow as "sheet unavailable" and silently degrade the book to hitsMap.
+    req_ = urllib.request.Request(u, headers={"Authorization": "Bearer " + cred.token})
+    return json.loads(urllib.request.urlopen(req_, timeout=180).read()).get("values", [])
 
 
 def creds():
