@@ -289,16 +289,33 @@ def main():
     # ---- HIT2 (card 10453, hit2 == 1) — total count across all teams ----
     MON3 = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
     hitrows = req(f"{url}/api/card/{HIT_CARD}/query/json", 'POST', {}, H)
-    hit2_detail = []
+    # "Total HIT2" = DISTINCT sellers with hit2=1. Two things this must not do:
+    #   1. drop a seller because hit2_month / hit2_year is NULL. Those columns only drive the
+    #      month breakdown; a seller freshly flagged hit2=1 before the month fields are filled in
+    #      is still a HIT2 seller and must still be counted (bucketed as 'Unknown').
+    #   2. count per ROW. hit_master_data is a full historical dump, so a seller with more than one
+    #      hit2 row would be counted twice. Keep the EARLIEST month per seller (the conversion).
+    _h2seen = {}
     for r in hitrows:
         if str(r.get('hit2')).strip() not in ('1', '1.0', 'True', 'true'):
             continue
-        hm, hy = r.get('hit2_month'), r.get('hit2_year')
-        if hm is None or hy is None:
+        _sid = str(r.get('seller_id') or '').strip()
+        if not _sid:
             continue
-        hit2_detail.append({'s': str(r.get('seller_id') or ''), 'n': str(r.get('seller_name') or ''),
-                            'mon': MON3[int(hm) - 1] + ' ' + str(int(hy)), 'team': str(r.get('team') or '')})
-    hit2_detail.sort(key=lambda x: x['mon'])
+        hm, hy = r.get('hit2_month'), r.get('hit2_year')
+        try:
+            _mon = MON3[int(hm) - 1] + ' ' + str(int(hy))
+            _key = (int(hy), int(hm))
+        except (TypeError, ValueError):
+            _mon, _key = 'Unknown', (9999, 99)
+        _prev = _h2seen.get(_sid)
+        if _prev is None or _key < _prev[0]:
+            _h2seen[_sid] = (_key, {'s': _sid, 'n': str(r.get('seller_name') or ''),
+                                    'mon': _mon, 'team': str(r.get('team') or '')})
+    hit2_detail = [v[1] for v in sorted(_h2seen.values(), key=lambda x: x[0])]
+    _h2unknown = sum(1 for x in hit2_detail if x['mon'] == 'Unknown')
+    print(f"[bev] HIT2 total {len(hit2_detail)} distinct sellers"
+          + (f" ({_h2unknown} with no hit2_month/hit2_year -> 'Unknown')" if _h2unknown else ""))
 
     # ---- ARR cohort (card 11020): hit_year_month x M0..M6, with TARGET row ----
     cohort_raw = req(f"{url}/api/card/{COHORT_CARD}/query/json", 'POST', {}, H)
