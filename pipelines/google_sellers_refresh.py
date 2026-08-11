@@ -345,6 +345,11 @@ def main():
     # HIT2 straight from 10453 is what keeps them visible.
     _TRUE = ("1", "1.0", "True", "true")
     h2ids, name10453 = set(), {}
+    # Seller AGE (tenure) = months from the seller's HIT month to the current month. Confirmed with
+    # the growth team on 2026-08-11: tenure, NOT the golive-minus-HIT conversion lag that the
+    # "HIT1 -> Google Golive Conversion" cohort table uses. Sourced from card 10453's
+    # hit_month/hit_year, which this pipeline already fetches, so it costs no extra BigQuery.
+    hitmon = {}
     try:
         for r in fetch("/api/card/10453/query/json"):
             _s = str(r.get("seller_id") or "").strip()
@@ -354,6 +359,12 @@ def main():
                 name10453[_s] = str(r.get("seller_name")).strip()
             if str(r.get("hit2")).strip() in _TRUE and str(r.get("good_seller")).strip() not in _TRUE:
                 h2ids.add(_s)
+            try:                                  # earliest HIT month wins (historical dump)
+                _hk = (int(r.get("hit_year")), int(r.get("hit_month")))
+                if _hk[0] > 0 and 1 <= _hk[1] <= 12 and (_s not in hitmon or _hk < hitmon[_s]):
+                    hitmon[_s] = _hk
+            except (TypeError, ValueError):
+                pass
         print(f"[gsellers] card 10453: HIT2 population {len(h2ids)} "
               f"({len(h2ids & book)} of them also inside the book)")
     except Exception as ex:
@@ -542,6 +553,8 @@ def main():
     def gate(v):
         return v is not None and v > SPEND_GATE
 
+    _today = datetime.date.today()
+    _NOWI = _today.year * 12 + _today.month     # for the tenure (age) computation above
     rows_out = []
     for sid in gsids:
         meta = base.get(sid, {})
@@ -572,8 +585,11 @@ def main():
                          and w1p > PNL_HIT and w2p > PNL_HIT)
         subjective = bool(g1 and g2 and w1p is not None and w2p is not None
                           and w1p > PNL_HIT and w2p > PNL_SUBJ)
+        _hk = hitmon.get(sid)
+        _age = None if not _hk else max(0, _NOWI - (_hk[0] * 12 + _hk[1]))
         rows_out.append({
             "s": sid,
+            "age": _age,               # tenure in months since HIT month (None if unknown)
             "n": str(meta.get("n") or "").strip() or name10453.get(sid, ""),
             "h1": sid in h1ids,         # in the 1k-5k book and NOT a HIT2 graduate
             "h2": sid in h2ids,         # hit2 = 1 (overlaps h1 by design)
@@ -610,6 +626,12 @@ def main():
         "rows": rows_out,
         "dq": {
             "base1k5k": len(book), "bookSource": book_src, "totalAssigned": len(h1ids),
+            # tenure mix (months since HIT month). The view blends its per-age targets over this,
+            # so if ageUnknown ever climbs the blended targets are being computed off fewer sellers.
+            "ageMix": {k: sum(1 for r in rows_out if (('M%d' % r["age"]) if r["age"] is not None and r["age"] < 4
+                                                      else ('M4+' if r["age"] is not None else 'unknown')) == k)
+                       for k in ('M0', 'M1', 'M2', 'M3', 'M4+', 'unknown')},
+            "ageUnknown": sum(1 for r in rows_out if r["age"] is None),
             "googleHandedOver": sorted(GOOGLE_HANDOVER_DONE), "googleAssetsCreated": len(gaids),
             # per-bucket headline counts. HIT2 rows carry no GL/CL mapping and no weekly google
             # PNL, so the view shows only these four for HIT2 / HIT1+HIT2.
